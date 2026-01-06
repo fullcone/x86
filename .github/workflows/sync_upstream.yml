@@ -107,9 +107,10 @@ jobs:
 
       - name: Disable Update_Checker schedule (prevent auto trigger)
         run: |
-          # 禁用 Update_Checker 的定时触发，避免自动编译
+          # 注释掉整个 schedule 块，避免自动编译
           if [ -f .github/workflows/Update_Checker.yml ]; then
-            sed -i 's/- cron:.*$/# - cron: disabled by patch/' .github/workflows/Update_Checker.yml
+            sed -i 's/^  schedule:$/  # schedule: disabled by patch/' .github/workflows/Update_Checker.yml
+            sed -i 's/^    - cron:/    # - cron:/' .github/workflows/Update_Checker.yml
           fi
 
       - name: Set keep_latest releases to 1
@@ -426,4 +427,3 @@ jobs:
           gh workflow run "Build-OpenWrt_Multi-Platform(V5).yml" --ref main --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.X86OPENWRT }}
-
