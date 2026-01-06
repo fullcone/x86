@@ -107,10 +107,14 @@ jobs:
 
       - name: Disable Update_Checker schedule (prevent auto trigger)
         run: |
-          # 注释掉整个 schedule 块，避免自动编译
+          # 删除整个 schedule 块，避免自动编译
           if [ -f .github/workflows/Update_Checker.yml ]; then
-            sed -i 's/^  schedule:$/  # schedule: disabled by patch/' .github/workflows/Update_Checker.yml
-            sed -i 's/^    - cron:/    # - cron:/' .github/workflows/Update_Checker.yml
+            # 使用 awk 删除 schedule: 到下一个顶级键之间的所有行
+            awk '
+              /^  schedule:/ { skip=1; next }
+              /^  [a-z]/ && skip { skip=0 }
+              !skip { print }
+            ' .github/workflows/Update_Checker.yml > temp.yml && mv temp.yml .github/workflows/Update_Checker.yml
           fi
 
       - name: Set keep_latest releases to 1
