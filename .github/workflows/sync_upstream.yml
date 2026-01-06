@@ -102,7 +102,7 @@ jobs:
       - name: Modify default IP (optional)
         run: |
           # 如果你想修改默认IP，取消下面的注释并修改
-          # sed -i 's/172.16.0.253/192.168.1.1/g' diy_script/openwrt_diy/diy-part2.sh
+          sed -i 's/172.16.0.253/192.168.1.1/g' diy_script/openwrt_diy/diy-part2.sh
           echo "默认IP: 172.16.0.253"
 
       - name: Disable Update_Checker schedule (prevent auto trigger)
@@ -426,3 +426,4 @@ jobs:
           gh workflow run "Build-OpenWrt_Multi-Platform(V5).yml" --ref main --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.X86OPENWRT }}
+
