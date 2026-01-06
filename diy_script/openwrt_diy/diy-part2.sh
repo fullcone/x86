@@ -53,6 +53,7 @@ rm -rf temp_resp
 
 ./scripts/feeds update -a
 ./scripts/feeds install -a
+sed -i "s|--set=llvm.download-ci-llvm=true|--set=llvm.download-ci-llvm=false|" feeds/packages/lang/rust/Makefile 2>/dev/null || true
 
 # fixed rust host build download llvm in ci error
 # sed -i 's/--set=llvm\.download-ci-llvm=false/--set=llvm.download-ci-llvm=true/' feeds/packages/lang/rust/Makefile

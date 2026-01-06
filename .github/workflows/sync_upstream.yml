@@ -1,0 +1,474 @@
+#
+# 同步上游 OpenWrtAction 并应用自定义补丁
+# Fork from: https://github.com/smallprogram/OpenWrtAction
+#
+
+name: Sync Upstream and Patch
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 2:00 (北京时间 10:00)
+  workflow_dispatch:
+    inputs:
+      trigger_build:
+        description: '同步后是否触发编译'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.X86OPENWRT }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Backup custom files
+        run: |
+          mkdir -p /tmp/backup
+          cp .github/workflows/sync_upstream.yml /tmp/backup/
+
+      - name: Sync upstream
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/smallprogram/OpenWrtAction.git
+          fi
+          git fetch upstream
+          # 强制用上游覆盖所有文件
+          git reset --hard upstream/main
+
+      - name: Restore custom files
+        run: |
+          cp /tmp/backup/sync_upstream.yml .github/workflows/
+
+      - name: Remove immortalwrt and lede platforms (keep openwrt only)
+        run: |
+          # 修改 platforms.sh，只保留 openwrt
+          sed -i "s/source_code_platforms=(openwrt immortalwrt lede)/source_code_platforms=(openwrt)/" compile_script/platforms.sh
+          
+          # 删除不需要的平台文件夹
+          rm -rf diy_script/immortalwrt_diy
+          rm -rf diy_script/lean_diy
+          rm -rf config/immortalwrt_config
+          rm -rf config/leanlede_config
+          
+          # 删除不需要的依赖文件
+          rm -f diy_script/immortalwrt_dependence 2>/dev/null || true
+          rm -f diy_script/lede_dependence 2>/dev/null || true
+          
+          # 删除不需要的 seed 配置
+          rm -f config/seed/immortalwrt_seed.config 2>/dev/null || true
+          rm -f config/seed/lean_seed.config 2>/dev/null || true
+          
+          # 删除不需要的 platform 脚本 (WSL用)
+          rm -f platform_immortalwrt.sh 2>/dev/null || true
+          rm -f platform_lean.sh 2>/dev/null || true
+          rm -f wsl2op.sh 2>/dev/null || true
+          
+          # 删除不需要的 git_log 目录
+          rm -rf git_log/immortalwrt 2>/dev/null || true
+          rm -rf git_log/lede 2>/dev/null || true
+          
+          # 删除不需要的测试工作流
+          rm -f .github/workflows/test_immortalwrt.yml 2>/dev/null || true
+          rm -f .github/workflows/test_lean.yml 2>/dev/null || true
+          rm -f .github/workflows/test1.yml 2>/dev/null || true
+          
+          # 验证修改
+          echo "=== 修改后的 platforms.sh ==="
+          grep "source_code_platforms" compile_script/platforms.sh
+          echo "=== 保留的 diy_script ==="
+          ls -la diy_script/
+          echo "=== 保留的 config ==="
+          ls -la config/
+          echo "=== 保留的 git_log ==="
+          ls -la git_log/
+
+      - name: Modify default IP (optional)
+        run: |
+          # 如果你想修改默认IP，取消下面的注释并修改
+          sed -i 's/172.16.0.253/192.168.1.1/g' diy_script/openwrt_diy/diy-part2.sh
+          echo "默认IP: 172.16.0.253"
+
+      - name: Disable Update_Checker schedule (prevent auto trigger)
+        run: |
+          # 使用 yq 正确修改 YAML 文件，删除 schedule 触发器
+          if [ -f .github/workflows/Update_Checker.yml ]; then
+            # 安装 yq
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+            
+            # 删除 on.schedule 节点
+            yq -i 'del(.on.schedule)' .github/workflows/Update_Checker.yml
+            
+            echo "=== Update_Checker schedule 已删除 ==="
+            yq '.on' .github/workflows/Update_Checker.yml
+          fi
+
+      - name: Fix git pull in build workflow
+        run: |
+          # 创建修复脚本（heredoc 单引号阻止变量展开）
+          cat << 'SCRIPT_EOF' > /tmp/fix_build.sh
+          #!/bin/bash
+          BUILD_FILE=".github/workflows/Build-OpenWrt_Multi-Platform(V5).yml"
+          if [ -f "$BUILD_FILE" ]; then
+            sed -i 's|git pull origin ${{ github.ref_name }}|git fetch origin ${{ github.ref_name }} \&\& git reset --hard origin/${{ github.ref_name }}|g' "$BUILD_FILE"
+            sed -i 's|git push origin --delete temp-${{ matrix.source_code_platform }}$|git push origin --delete temp-${{ matrix.source_code_platform }} 2>/dev/null || true|g' "$BUILD_FILE"
+            sed -i 's|git push origin --delete temp-tag-gitlog$|git push origin --delete temp-tag-gitlog 2>/dev/null || true|g' "$BUILD_FILE"
+            echo "=== 编译工作流已修复 ==="
+          fi
+          SCRIPT_EOF
+          chmod +x /tmp/fix_build.sh
+          /tmp/fix_build.sh
+
+      - name: Set keep_latest releases to 1
+        run: |
+          # 修改保留 Release 数量为 1
+          if [ -f .github/workflows/Update_Checker.yml ]; then
+            sed -i 's/keep_latest: 10/keep_latest: 1/' .github/workflows/Update_Checker.yml
+          fi
+          
+          # 验证修改
+          echo "=== 修改后的 keep_latest ==="
+          grep "keep_latest" .github/workflows/Update_Checker.yml || echo "未找到"
+
+      - name: Fix Rust CI build error
+        run: |
+          # 创建修复脚本
+          cat << 'SCRIPT_EOF' > /tmp/fix_rust.sh
+          #!/bin/bash
+          DIY_FILE="diy_script/openwrt_diy/diy-part2.sh"
+          if [ -f "$DIY_FILE" ]; then
+            if ! grep -q "^sed -i.*download-ci-llvm" "$DIY_FILE"; then
+              sed -i '/\.\/scripts\/feeds install -a/a sed -i "s|--set=llvm.download-ci-llvm=true|--set=llvm.download-ci-llvm=false|" feeds/packages/lang/rust/Makefile 2>/dev/null || true' "$DIY_FILE"
+              echo "=== Rust CI 修复已添加 ==="
+            else
+              echo "=== Rust CI 修复已存在 ==="
+            fi
+          fi
+          grep -n "download-ci-llvm" "$DIY_FILE" || echo "未找到"
+          SCRIPT_EOF
+          chmod +x /tmp/fix_rust.sh
+          /tmp/fix_rust.sh
+
+      - name: Enable nlbwmon in all configs
+        run: |
+          # 启用 nlbwmon 流量监控 (不与 bandwidthd/eqos/sqm/oaf 冲突)
+          for config in config/openwrt_config/*.config; do
+            # 启用 luci-app-nlbwmon
+            sed -i 's/# CONFIG_PACKAGE_luci-app-nlbwmon is not set/CONFIG_PACKAGE_luci-app-nlbwmon=y/' "$config"
+            # 启用 nlbwmon 主程序
+            sed -i 's/# CONFIG_PACKAGE_nlbwmon is not set/CONFIG_PACKAGE_nlbwmon=y/' "$config"
+            # 启用中文语言包
+            sed -i 's/# CONFIG_PACKAGE_luci-i18n-nlbwmon-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-nlbwmon-zh-cn=y/' "$config"
+          done
+          
+          echo "=== nlbwmon 已启用 ==="
+          grep "nlbwmon=y" config/openwrt_config/X86.config || echo "未找到"
+
+      - name: Add missing network drivers
+        run: |
+          # 为所有 openwrt 配置添加缺失的网卡驱动
+          for config in config/openwrt_config/*.config; do
+            echo "处理配置文件: $config"
+            
+            # ===== 2.5G/5G Realtek 网卡 (RSS版本) =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-r8125 is not set/CONFIG_PACKAGE_kmod-r8125-rss=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-r8125-rss is not set/CONFIG_PACKAGE_kmod-r8125-rss=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-r8126 is not set/CONFIG_PACKAGE_kmod-r8126-rss=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-r8126-rss is not set/CONFIG_PACKAGE_kmod-r8126-rss=y/' "$config"
+            
+            # ===== Intel 10G/40G 网卡 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-i40e is not set/CONFIG_PACKAGE_kmod-i40e=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-i40evf is not set/CONFIG_PACKAGE_kmod-i40evf=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-iavf is not set/CONFIG_PACKAGE_kmod-iavf=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-ixgbe is not set/CONFIG_PACKAGE_kmod-ixgbe=y/' "$config"
+            
+            # ===== 虚拟化网卡驱动 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-vmxnet3 is not set/CONFIG_PACKAGE_kmod-vmxnet3=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-igbvf is not set/CONFIG_PACKAGE_kmod-igbvf=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-ixgbevf is not set/CONFIG_PACKAGE_kmod-ixgbevf=y/' "$config"
+            
+            # ===== 老旧/兼容网卡 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-8139cp is not set/CONFIG_PACKAGE_kmod-8139cp=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-8139too is not set/CONFIG_PACKAGE_kmod-8139too=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-pcnet32 is not set/CONFIG_PACKAGE_kmod-pcnet32=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-tulip is not set/CONFIG_PACKAGE_kmod-tulip=y/' "$config"
+            
+            # ===== 100M Realtek =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-r8101 is not set/CONFIG_PACKAGE_kmod-r8101=y/' "$config"
+            
+            # ===== 高端网卡 (LEDE 特有) =====
+            # Aquantia/Marvell AQtion 10G
+            sed -i 's/# CONFIG_PACKAGE_kmod-atlantic is not set/CONFIG_PACKAGE_kmod-atlantic=y/' "$config"
+            # Broadcom NetXtreme II 10G
+            sed -i 's/# CONFIG_PACKAGE_kmod-bnx2x is not set/CONFIG_PACKAGE_kmod-bnx2x=y/' "$config"
+            # Mellanox ConnectX-3/4
+            sed -i 's/# CONFIG_PACKAGE_kmod-mlx4-core is not set/CONFIG_PACKAGE_kmod-mlx4-core=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-mlx5-core is not set/CONFIG_PACKAGE_kmod-mlx5-core=y/' "$config"
+          done
+          
+          echo "=== 网卡驱动已添加 ==="
+          echo "--- 2.5G/5G Realtek (RSS) ---"
+          grep -E "kmod-r8125|kmod-r8126" config/openwrt_config/X86.config | head -4
+          echo "--- Intel 10G/40G ---"
+          grep -E "kmod-i40e|kmod-iavf" config/openwrt_config/X86.config | head -2
+          echo "--- 虚拟化网卡 ---"
+          grep -E "kmod-vmxnet3|kmod-igbvf|kmod-ixgbevf" config/openwrt_config/X86.config | head -3
+
+      - name: Add missing default packages
+        run: |
+          # 为所有 openwrt 配置添加缺失的默认软件包
+          for config in config/openwrt_config/*.config; do
+            echo "处理配置文件: $config"
+            
+            # ===== dnsmasq 改用 full 版本 =====
+            sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_dnsmasq-full is not set/CONFIG_PACKAGE_dnsmasq-full=y/' "$config"
+            
+            # ===== 系统工具 =====
+            # autocore (CPU温度/频率显示) - 需要从 immortalwrt 获取，diy脚本已处理
+            sed -i 's/# CONFIG_PACKAGE_autocore is not set/CONFIG_PACKAGE_autocore=y/' "$config"
+            
+            # automount (自动挂载)
+            sed -i 's/# CONFIG_PACKAGE_automount is not set/CONFIG_PACKAGE_automount=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_block-mount is not set/CONFIG_PACKAGE_block-mount=y/' "$config"
+            
+            # default-settings-chn (中文默认设置)
+            sed -i 's/# CONFIG_PACKAGE_default-settings is not set/CONFIG_PACKAGE_default-settings=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_default-settings-chn is not set/CONFIG_PACKAGE_default-settings-chn=y/' "$config"
+            
+            # ===== 磁盘工具 =====
+            sed -i 's/# CONFIG_PACKAGE_fdisk is not set/CONFIG_PACKAGE_fdisk=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_cfdisk is not set/CONFIG_PACKAGE_cfdisk=y/' "$config"
+            
+            # ===== 文件系统 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-fs-f2fs is not set/CONFIG_PACKAGE_kmod-fs-f2fs=y/' "$config"
+            
+            # ===== USB 网卡驱动 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net is not set/CONFIG_PACKAGE_kmod-usb-net=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-asix is not set/CONFIG_PACKAGE_kmod-usb-net-asix=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-asix-ax88179 is not set/CONFIG_PACKAGE_kmod-usb-net-asix-ax88179=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-rtl8150 is not set/CONFIG_PACKAGE_kmod-usb-net-rtl8150=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-rtl8152-vendor is not set/CONFIG_PACKAGE_kmod-usb-net-rtl8152-vendor=y/' "$config"
+            
+            # ===== USB HID =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-hid is not set/CONFIG_PACKAGE_kmod-usb-hid=y/' "$config"
+            
+            # ===== NAT helper =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-nf-nathelper is not set/CONFIG_PACKAGE_kmod-nf-nathelper=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-nf-nathelper-extra is not set/CONFIG_PACKAGE_kmod-nf-nathelper-extra=y/' "$config"
+            
+            # ===== coremark 性能测试 =====
+            sed -i 's/# CONFIG_PACKAGE_coremark is not set/CONFIG_PACKAGE_coremark=y/' "$config"
+            
+            # ===== Intel/AMD 显卡固件 =====
+            sed -i 's/# CONFIG_PACKAGE_i915-firmware-dmc is not set/CONFIG_PACKAGE_i915-firmware-dmc=y/' "$config"
+          done
+          
+          echo "=== 默认软件包已添加 ==="
+          echo "--- dnsmasq-full ---"
+          grep "dnsmasq" config/openwrt_config/X86.config | head -3
+          echo "--- default-settings ---"
+          grep "default-settings" config/openwrt_config/X86.config | head -2
+          echo "--- autocore/automount ---"
+          grep -E "autocore|automount|block-mount" config/openwrt_config/X86.config | head -3
+
+      - name: Add LEDE default LuCI apps
+        run: |
+          # 为所有 openwrt 配置添加 LEDE 默认的 LuCI 应用
+          for config in config/openwrt_config/*.config; do
+            echo "处理配置文件: $config"
+            
+            # ===== 网络加速 =====
+            # turboacc (网络加速) - LEDE 特有
+            sed -i 's/# CONFIG_PACKAGE_luci-app-turboacc is not set/CONFIG_PACKAGE_luci-app-turboacc=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING is not set/CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_TURBOACC_INCLUDE_BBR_CCA is not set/CONFIG_PACKAGE_TURBOACC_INCLUDE_BBR_CCA=y/' "$config"
+            
+            # ===== 访问控制 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-accesscontrol is not set/CONFIG_PACKAGE_luci-app-accesscontrol=y/' "$config"
+            
+            # ===== 定时重启 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-autoreboot is not set/CONFIG_PACKAGE_luci-app-autoreboot=y/' "$config"
+            
+            # ===== ARP 绑定 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-arpbind is not set/CONFIG_PACKAGE_luci-app-arpbind=y/' "$config"
+            
+            # ===== 文件传输 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-filetransfer is not set/CONFIG_PACKAGE_luci-app-filetransfer=y/' "$config"
+            
+            # ===== FTP 服务 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-vsftpd is not set/CONFIG_PACKAGE_luci-app-vsftpd=y/' "$config"
+            
+            # ===== Samba/文件共享 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-samba4 is not set/CONFIG_PACKAGE_luci-app-samba4=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_luci-app-ksmbd is not set/CONFIG_PACKAGE_luci-app-ksmbd=y/' "$config"
+            
+            # ===== IPv6 =====
+            sed -i 's/# CONFIG_PACKAGE_luci-proto-ipv6 is not set/CONFIG_PACKAGE_luci-proto-ipv6=y/' "$config"
+            
+            # ===== 中文语言包 =====
+            sed -i 's/# CONFIG_LUCI_LANG_zh_Hans is not set/CONFIG_LUCI_LANG_zh_Hans=y/' "$config"
+            
+            # ===== iptables 扩展 (LEDE 特有) =====
+            sed -i 's/# CONFIG_PACKAGE_iptables-mod-extra is not set/CONFIG_PACKAGE_iptables-mod-extra=y/' "$config"
+            
+            # ===== passwall2 IPv6 NAT 支持 (LEDE 特有) =====
+            sed -i 's/# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_IPv6_Nat is not set/CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_IPv6_Nat=y/' "$config"
+          done
+          
+          echo "=== LEDE 默认 LuCI 应用已添加 ==="
+          echo "--- turboacc ---"
+          grep "turboacc" config/openwrt_config/X86.config | head -3
+          echo "--- 其他应用 ---"
+          grep -E "accesscontrol|autoreboot|arpbind|filetransfer|vsftpd" config/openwrt_config/X86.config | head -5
+
+      - name: Add firmware format and hardware support
+        run: |
+          # 为所有 openwrt 配置添加固件格式和硬件支持
+          for config in config/openwrt_config/*.config; do
+            echo "处理配置文件: $config"
+            
+            # ===== GRUB 启动超时改为 0 秒 =====
+            sed -i 's/CONFIG_GRUB_TIMEOUT="[0-9]*"/CONFIG_GRUB_TIMEOUT="0"/' "$config"
+            
+            # ===== 启用 QCOW2 镜像格式 =====
+            sed -i 's/# CONFIG_QCOW2_IMAGES is not set/CONFIG_QCOW2_IMAGES=y/' "$config"
+            
+            # ===== 丰富 USB 网卡驱动 =====
+            # AQC111 (Aquantia 5G USB)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-aqc111 is not set/CONFIG_PACKAGE_kmod-usb-net-aqc111=y/' "$config"
+            # CDC-EEM
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-cdc-eem is not set/CONFIG_PACKAGE_kmod-usb-net-cdc-eem=y/' "$config"
+            # CDC-Ether
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-cdc-ether is not set/CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y/' "$config"
+            # CDC-NCM
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-cdc-ncm is not set/CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y/' "$config"
+            # CDC-Subset
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-cdc-subset is not set/CONFIG_PACKAGE_kmod-usb-net-cdc-subset=y/' "$config"
+            # DM9601 (Davicom)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-dm9601-ether is not set/CONFIG_PACKAGE_kmod-usb-net-dm9601-ether=y/' "$config"
+            # Huawei CDC-NCM
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-huawei-cdc-ncm is not set/CONFIG_PACKAGE_kmod-usb-net-huawei-cdc-ncm=y/' "$config"
+            # ipheth (iPhone USB)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-ipheth is not set/CONFIG_PACKAGE_kmod-usb-net-ipheth=y/' "$config"
+            # MCS7830
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-mcs7830 is not set/CONFIG_PACKAGE_kmod-usb-net-mcs7830=y/' "$config"
+            # Pegasus (ADMtek)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-pegasus is not set/CONFIG_PACKAGE_kmod-usb-net-pegasus=y/' "$config"
+            # PL (Prolific)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-pl is not set/CONFIG_PACKAGE_kmod-usb-net-pl=y/' "$config"
+            # QMI-WWAN (4G/5G Modem)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-qmi-wwan is not set/CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y/' "$config"
+            # RNDIS (Windows Mobile)
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-rndis is not set/CONFIG_PACKAGE_kmod-usb-net-rndis=y/' "$config"
+            # SMSC95xx
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-smsc95xx is not set/CONFIG_PACKAGE_kmod-usb-net-smsc95xx=y/' "$config"
+            # SR9700
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-net-sr9700 is not set/CONFIG_PACKAGE_kmod-usb-net-sr9700=y/' "$config"
+            
+            # ===== 声卡驱动 =====
+            # HDA Core
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-hda-core is not set/CONFIG_PACKAGE_kmod-sound-hda-core=y/' "$config"
+            # HDA Intel
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-hda-intel is not set/CONFIG_PACKAGE_kmod-sound-hda-intel=y/' "$config"
+            # HDA Codec HDMI
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-hda-codec-hdmi is not set/CONFIG_PACKAGE_kmod-sound-hda-codec-hdmi=y/' "$config"
+            # HDA Codec Realtek
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-hda-codec-realtek is not set/CONFIG_PACKAGE_kmod-sound-hda-codec-realtek=y/' "$config"
+            # HDA Codec VIA
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-hda-codec-via is not set/CONFIG_PACKAGE_kmod-sound-hda-codec-via=y/' "$config"
+            # i8x0 (Intel ICH)
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-i8x0 is not set/CONFIG_PACKAGE_kmod-sound-i8x0=y/' "$config"
+            # VIA82xx
+            sed -i 's/# CONFIG_PACKAGE_kmod-sound-via82xx is not set/CONFIG_PACKAGE_kmod-sound-via82xx=y/' "$config"
+            # USB Audio
+            sed -i 's/# CONFIG_PACKAGE_kmod-usb-audio is not set/CONFIG_PACKAGE_kmod-usb-audio=y/' "$config"
+            
+            # ===== CPU Microcode =====
+            # AMD Microcode
+            sed -i 's/# CONFIG_PACKAGE_amd64-microcode is not set/CONFIG_PACKAGE_amd64-microcode=y/' "$config"
+            # Intel Microcode
+            sed -i 's/# CONFIG_PACKAGE_intel-microcode is not set/CONFIG_PACKAGE_intel-microcode=y/' "$config"
+            
+            # ===== IPv6 NAT =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-ipt-nat6 is not set/CONFIG_PACKAGE_kmod-ipt-nat6=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_ip6tables-mod-nat is not set/CONFIG_PACKAGE_ip6tables-mod-nat=y/' "$config"
+            
+            # ===== 显卡驱动 (LEDE 特有) =====
+            # AMD GPU
+            sed -i 's/# CONFIG_PACKAGE_kmod-drm-amdgpu is not set/CONFIG_PACKAGE_kmod-drm-amdgpu=y/' "$config"
+            
+            # ===== 存储卡驱动 (LEDE 特有) =====
+            # MMC/SD 卡
+            sed -i 's/# CONFIG_PACKAGE_kmod-mmc is not set/CONFIG_PACKAGE_kmod-mmc=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_kmod-sdhci is not set/CONFIG_PACKAGE_kmod-sdhci=y/' "$config"
+            
+            # ===== iptables raw 表 (LEDE 特有) =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-ipt-raw is not set/CONFIG_PACKAGE_kmod-ipt-raw=y/' "$config"
+            
+            # ===== TUN 设备 =====
+            sed -i 's/# CONFIG_PACKAGE_kmod-tun is not set/CONFIG_PACKAGE_kmod-tun=y/' "$config"
+          done
+          
+          echo "=== 固件格式和硬件支持已添加 ==="
+          echo "--- GRUB 超时 ---"
+          grep "GRUB_TIMEOUT" config/openwrt_config/X86.config | head -1
+          echo "--- QCOW2 ---"
+          grep "QCOW2" config/openwrt_config/X86.config | head -1
+          echo "--- 声卡驱动 ---"
+          grep "kmod-sound" config/openwrt_config/X86.config | head -5
+          echo "--- Microcode ---"
+          grep "microcode" config/openwrt_config/X86.config | head -2
+          echo "--- IPv6 NAT ---"
+          grep -E "ipt-nat6|ip6tables-mod-nat" config/openwrt_config/X86.config | head -2
+
+      - name: Patch compile scripts (remove immortalwrt/lede references)
+        run: |
+          # 修改 step06_update_git_log.sh - 只保留 openwrt
+          sed -i 's/git_folders=(openwrt immortalwrt lede feeds custompackages)/git_folders=(openwrt feeds custompackages)/' compile_script/step06_update_git_log.sh
+          
+          # 修改 Release 徽章 - 删除 immortalwrt 和 lean 的徽章，只保留 openwrt
+          # 使用 sed 直接替换整行
+          sed -i '/source-openwrt.*source-immortalwrt.*source-lean/c\echo "[![](https://img.shields.io/badge/source-openwrt_25.12-green?logo=openwrt\&logoColor=green\&style=flat-square)](https://github.com/openwrt/openwrt)">> release.txt' compile_script/step06_update_git_log.sh
+          
+          echo "=== 编译脚本已修改 ==="
+          grep "git_folders" compile_script/step06_update_git_log.sh
+          echo "=== 徽章行 ==="
+          grep "source-openwrt" compile_script/step06_update_git_log.sh | head -1
+
+      - name: Commit and push changes
+        id: commit
+        run: |
+          git add .
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: sync upstream and keep openwrt only"
+            git push --force
+            echo "changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes to commit"
+            echo "changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger build workflow (if requested)
+        if: github.event.inputs.trigger_build == 'true' && steps.commit.outputs.changes == 'true'
+        run: |
+          gh workflow run "Build-OpenWrt_Multi-Platform(V5).yml" --ref main --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.X86OPENWRT }}
