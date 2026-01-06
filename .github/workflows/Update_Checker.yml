@@ -8,9 +8,8 @@
 # File: .github/workflows/Update_Checker.yml
 # Description: Source code update checker
 #
-
+# 
 name: Update_Checker
-
 on:
   workflow_dispatch:
     inputs:
@@ -18,70 +17,55 @@ on:
         description: 'SSH connection to Actions'
         required: false
         default: 'false'
-  schedule:
-    - cron: 0 0 * * *
-      # 0 4 * * 5
-      # 0 4,12,20 * * *
+# 0 4,12,20 * * *
 
 env:
   UPDATE_CHECKER: compile_script/update_checker.sh
-
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
-
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-
-    - name: Checkout
-      uses: actions/checkout@main
-      with:
-        fetch-depth: 0
-
-    - name: Get Commit Hash
-      id: getHash
-      run: |
-        chmod +x $UPDATE_CHECKER
-        $GITHUB_WORKSPACE/$UPDATE_CHECKER
-
-    - name: Compare Commit Hash
-      id: cacheHash
-      uses: actions/cache@v4
-      with:
-        path: .commitHash_All
-        key: HEAD-${{ steps.getHash.outputs.HASH_STRING }}
-   
-
-    - name: Save New Commit Hash
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      run: |
-        echo ${{ steps.getHash.outputs.HASH_STRING }} | tee .commitHash_All
-        
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
+      - name: SSH connection to Actions
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+      - name: Get Commit Hash
+        id: getHash
+        run: |
+          chmod +x $UPDATE_CHECKER
+          $GITHUB_WORKSPACE/$UPDATE_CHECKER
+      - name: Compare Commit Hash
+        id: cacheHash
+        uses: actions/cache@v4
+        with:
+          path: .commitHash_All
+          key: HEAD-${{ steps.getHash.outputs.HASH_STRING }}
+      - name: Save New Commit Hash
+        if: steps.cacheHash.outputs.cache-hit != 'true'
+        run: |
+          echo ${{ steps.getHash.outputs.HASH_STRING }} | tee .commitHash_All
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@main
+        with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
           retain_days: 90
           keep_minimum_runs: 6
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      with:
-        keep_latest: 10
-        keep_min_download_counts: 2
-        delete_expired_data: 30
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Trigger build
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@main
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        event-type: openwrt_source_update
-
+      - name: Remove old Releases
+        uses: dev-drprasad/delete-older-releases@master
+        with:
+          keep_latest: 1
+          keep_min_download_counts: 2
+          delete_expired_data: 30
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger build
+        if: steps.cacheHash.outputs.cache-hit != 'true'
+        uses: peter-evans/repository-dispatch@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: openwrt_source_update
