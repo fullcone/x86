@@ -71,7 +71,7 @@ jobs:
     - name: Remove old Releases
       uses: dev-drprasad/delete-older-releases@master
       with:
-        keep_latest: 10
+        keep_latest: 3
         keep_min_download_counts: 2
         delete_expired_data: 30
         delete_tags: true
