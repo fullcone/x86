@@ -1,6 +1,0 @@
-<details> <summary> <b>lede new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-2186cbfdc|John Audia|Tue Dec 16 16:42:12 2025 -0500|cryptodev-linux: fixes 6.18 build
-</details>

@@ -337,7 +337,7 @@ jobs:
 
       - name: Pull the latest changes
         if: steps.matrix_status.outputs.status != 'success'
-        run: git pull origin ${{ github.ref_name }}
+        run: git fetch origin && git reset --hard origin/ ${{ github.ref_name }}
 
       - name: Install Packages
         if: steps.matrix_status.outputs.status != 'success'
@@ -673,7 +673,7 @@ jobs:
           
       - name: Pull the latest changes
         if: steps.matrix_status.outputs.status != 'success'
-        run: git pull origin ${{ github.ref_name }}
+        run: git fetch origin && git reset --hard origin/ ${{ github.ref_name }}
 
       - name: Install Packages
         if: steps.matrix_status.outputs.status != 'success'
@@ -923,7 +923,7 @@ jobs:
 
       - name: Pull the latest changes
         run: |
-          git pull origin ${{ github.ref_name }}
+          git fetch origin && git reset --hard origin/ ${{ github.ref_name }}
 
       - name: Download Tags
         uses: actions/download-artifact@v6
@@ -976,7 +976,7 @@ jobs:
         if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.MY_SECRET_PAT }}
+          token: ${{ secrets.X86OPENWRT }}
           repository: smallprogram/MyAction
           event-type: openwrt_compilation_completed
       
