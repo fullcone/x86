@@ -976,7 +976,7 @@ jobs:
         if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.MY_SECRET_PAT }}
+          token: ${{ secrets.X86OPENWRT }}
           repository: smallprogram/MyAction
           event-type: openwrt_compilation_completed
       
