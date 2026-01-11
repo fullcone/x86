@@ -1,0 +1,181 @@
+#
+# 同步上游 OpenWrtAction 并应用自定义补丁
+# Fork from: https://github.com/smallprogram/OpenWrtAction
+#
+
+name: Sync Upstream and Patch
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 2:00 (北京时间 10:00)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.X86OPENWRT }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Backup custom files
+        run: |
+          mkdir -p /tmp/backup
+          cp .github/workflows/sync_upstream.yml /tmp/backup/
+
+      - name: Sync upstream
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/smallprogram/OpenWrtAction.git
+          fi
+          git fetch upstream
+          git reset --hard upstream/main
+
+      - name: Restore custom files
+        run: |
+          cp /tmp/backup/sync_upstream.yml .github/workflows/
+
+      - name: Keep ImmortalWrt only
+        run: |
+          # 修改 platforms.sh，只保留 immortalwrt
+          sed -i "s/source_code_platforms=(openwrt immortalwrt lede)/source_code_platforms=(immortalwrt)/" compile_script/platforms.sh
+          
+          # 删除不需要的平台
+          rm -rf diy_script/openwrt_diy
+          rm -rf diy_script/lean_diy
+          rm -rf config/openwrt_config
+          rm -rf config/leanlede_config
+          rm -rf git_log/openwrt 2>/dev/null || true
+          rm -rf git_log/lede 2>/dev/null || true
+          
+          # 删除不需要的工作流（只保留 Build-OpenWrt_Multi-Platform(V5).yml 和 sync_upstream.yml）
+          rm -f .github/workflows/Merge-upstream.yml 2>/dev/null || true
+          rm -f .github/workflows/Retry_Failure_Jobs.yml 2>/dev/null || true
+          rm -f .github/workflows/*SelfHost*.yml 2>/dev/null || true
+          rm -f .github/workflows/Update_Checker.yml 2>/dev/null || true
+          rm -f .github/workflows/test*.yml 2>/dev/null || true
+          rm -f .github/workflows/Close_stale_issues_and_PRs.yml 2>/dev/null || true
+          rm -f ".github/workflows/Close stale issues and PRs.yml" 2>/dev/null || true
+          rm -f .github/workflows/defconfig.yml 2>/dev/null || true
+          rm -f .github/workflows/Retry_All_Jobs.yml 2>/dev/null || true
+          
+          echo "=== 只保留 ImmortalWrt ==="
+          grep "source_code_platforms" compile_script/platforms.sh
+
+      - name: Add samba4 to ImmortalWrt config
+        run: |
+          # 为所有 ImmortalWrt 配置添加 samba4
+          for config in config/immortalwrt_config/*.config; do
+            echo "处理: $config"
+            sed -i 's/# CONFIG_PACKAGE_luci-app-samba4 is not set/CONFIG_PACKAGE_luci-app-samba4=y/' "$config"
+            sed -i 's/# CONFIG_PACKAGE_luci-i18n-samba4-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-samba4-zh-cn=y/' "$config"
+          done
+          
+          echo "=== samba4 已添加 ==="
+          grep "samba4" config/immortalwrt_config/X86.config | head -5
+
+      - name: Add QEMU virtualization support
+        run: |
+          # 为 X86 配置添加 QEMU 虚拟化支持
+          config="config/immortalwrt_config/X86.config"
+          
+          # KVM 内核模块
+          sed -i 's/# CONFIG_PACKAGE_kmod-kvm-intel is not set/CONFIG_PACKAGE_kmod-kvm-intel=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_kmod-kvm-amd is not set/CONFIG_PACKAGE_kmod-kvm-amd=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_kmod-tun is not set/CONFIG_PACKAGE_kmod-tun=y/' "$config"
+          
+          # QEMU 主程序 (x86_64)
+          sed -i 's/# CONFIG_PACKAGE_qemu-x86_64-softmmu is not set/CONFIG_PACKAGE_qemu-x86_64-softmmu=y/' "$config"
+          
+          # QEMU 工具
+          sed -i 's/# CONFIG_PACKAGE_qemu-bridge-helper is not set/CONFIG_PACKAGE_qemu-bridge-helper=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_qemu-img is not set/CONFIG_PACKAGE_qemu-img=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_qemu-keymaps is not set/CONFIG_PACKAGE_qemu-keymaps=y/' "$config"
+          
+          # QEMU 固件
+          sed -i 's/# CONFIG_PACKAGE_qemu-firmware-efi is not set/CONFIG_PACKAGE_qemu-firmware-efi=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_qemu-firmware-seabios is not set/CONFIG_PACKAGE_qemu-firmware-seabios=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_qemu-firmware-seavgabios is not set/CONFIG_PACKAGE_qemu-firmware-seavgabios=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_qemu-firmware-pxe is not set/CONFIG_PACKAGE_qemu-firmware-pxe=y/' "$config"
+          
+          # virtio 控制台
+          sed -i 's/# CONFIG_PACKAGE_virtio-console-helper is not set/CONFIG_PACKAGE_virtio-console-helper=y/' "$config"
+          
+          # LuCI 界面
+          sed -i 's/# CONFIG_PACKAGE_luci-app-qemu is not set/CONFIG_PACKAGE_luci-app-qemu=y/' "$config"
+          sed -i 's/# CONFIG_PACKAGE_luci-i18n-qemu-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-qemu-zh-cn=y/' "$config"
+          
+          echo "=== QEMU 已添加 ==="
+          grep -E "qemu|kvm|virtio" "$config" | grep "=y" | head -15
+
+      - name: Add QEMU bridge config to diy script
+        run: |
+          # 在 diy-part2.sh 末尾添加 QEMU 桥接配置
+          cat >> diy_script/immortalwrt_diy/diy-part2.sh << 'EOFQEMU'
+
+          # Add QEMU bridge config
+          mkdir -p files/etc/qemu
+          echo "allow br-lan" > files/etc/qemu/bridge.conf
+          EOFQEMU
+          
+          echo "=== QEMU 桥接配置已添加 ==="
+          tail -5 diy_script/immortalwrt_diy/diy-part2.sh
+
+      - name: Modify default IP to 172.16.0.253
+        run: |
+          # 修改 diy-part2.sh 中的默认 IP
+          # 原: 192.168.1.1 -> 10.10.0.253
+          # 改: 192.168.1.1 -> 172.16.0.253
+          sed -i "s|sed -i 's/192.168.1.1/10.10.0.253/g'|sed -i 's/192.168.1.1/172.16.0.253/g'|" diy_script/immortalwrt_diy/diy-part2.sh
+          
+          echo "=== 默认 IP 已修改为 172.16.0.253 ==="
+          grep "192.168.1.1" diy_script/immortalwrt_diy/diy-part2.sh
+
+      - name: Fix workflow tokens
+        run: |
+          # 替换 token 名称
+          sed -i 's/secrets\.MY_SECRET_PAT/secrets.X86OPENWRT/g' ".github/workflows/Build-OpenWrt_Multi-Platform(V5).yml"
+          sed -i 's/secrets\.MY_SECRET_PAT/secrets.X86OPENWRT/g' .github/workflows/Update_Checker.yml 2>/dev/null || true
+          
+          # 修复 git pull 问题（强制推送后分支历史不一致）
+          # 把 git pull origin ${{ github.ref_name }} 改成 git fetch + reset
+          sed -i 's|git pull origin \${{ github.ref_name }}|git fetch origin \${{ github.ref_name }} \&\& git reset --hard origin/\${{ github.ref_name }}|g' ".github/workflows/Build-OpenWrt_Multi-Platform(V5).yml"
+          
+          # 删除重试失败任务的逻辑（因为我们删除了 Retry_Failure_Jobs.yml）
+          sed -i '/gh workflow run Retry_Failure_Jobs.yml/d' ".github/workflows/Build-OpenWrt_Multi-Platform(V5).yml"
+
+      - name: Set keep_latest releases to 3
+        run: |
+          # 修改保留 Release 数量为 3
+          if [ -f .github/workflows/Update_Checker.yml ]; then
+            sed -i 's/keep_latest: 10/keep_latest: 3/' .github/workflows/Update_Checker.yml
+          fi
+          echo "=== Release 保留数量已改为 3 ==="
+          grep "keep_latest" .github/workflows/Update_Checker.yml || echo "未找到"
+
+      - name: Commit and push
+        run: |
+          git add .
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: sync upstream, keep immortalwrt only, add samba4"
+            git push --force
+          else
+            echo "No changes"
+          fi
+
+      - name: Trigger build workflow
+        run: |
+          gh workflow run "Build-OpenWrt_Multi-Platform(V5).yml" --ref main --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.X86OPENWRT }}
