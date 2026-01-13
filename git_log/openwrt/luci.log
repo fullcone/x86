@@ -1,6 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-e28d72f32b|Paul Donald|Mon Jan 12 01:36:35 2026 +0100|luci-base: amend ZoneSelect widget datatype
-</details>
