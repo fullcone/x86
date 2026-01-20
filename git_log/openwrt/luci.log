@@ -1,7 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-e5179ccf4d|Dirk Brenken|Sun Jan 18 23:39:39 2026 +0100|luci-app-adblock: sync with adblock 4.5.0-1
-1ba60ed890|Daniel F. Dickinson|Mon Jan 19 02:44:52 2026 -0500|luci-app-radicale3: use ip6 bracket notation
-</details>

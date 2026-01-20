@@ -1,6 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-067178b7fd|Pierre-Emmanuel Frot|Sun Jan 18 21:13:28 2026 +0100|x86: cs5535audio: add support for subtarget legacy
-</details>
