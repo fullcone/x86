@@ -1,6 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-8d9defc6a2|Daniel F. Dickinson|Tue Jan 20 07:29:56 2026 -0500|luci-app-radicale3: fix bcrypt/libpass detection
-</details>

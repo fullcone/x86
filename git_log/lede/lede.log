@@ -1,7 +1,0 @@
-<details> <summary> <b>lede new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-8942bba34|coolsnowwolf|Tue Jan 20 14:31:54 2026 +0800|rockchip: fix set default serial_{addr,port} in boot script
-9f3456c41|coolsnowwolf|Tue Jan 20 14:25:16 2026 +0800|rockchip: Add support for Radxa ROCK 4SE The Radxa ROCK 4SE[1] is a single board computer using the Rockchip RK3399-T.
-</details>
