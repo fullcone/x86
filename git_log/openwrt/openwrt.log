@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-b2b40d09eb|Paul Donald|Sun Jan 18 00:28:44 2026 +0100|ucode: update to Git 85922056ef7 (2026-01-16)
-7aeb44935b|Felix Fietkau|Tue Jan 6 19:09:01 2026 +0000|ucode: remove the fs.read_nb patch
-</details>
