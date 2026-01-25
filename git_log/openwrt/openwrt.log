@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-27b48d0002|Robert Senderek|Fri Oct 10 14:40:21 2025 +0200|qualcommax: ipq50xx: Add support for Zyxel SCR50AXE
-ebf9f13938|Hauke Mehrtens|Thu Jan 22 23:14:21 2026 +0100|lantiq: AVM Fritz 736x: fix PCIe reset GPIO
-</details>
