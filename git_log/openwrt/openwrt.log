@@ -1,8 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-692150ee1f|Hauke Mehrtens|Mon Jan 26 01:32:23 2026 +0100|kernel: add missing kernel config option
-890a1d31fd|Hauke Mehrtens|Mon Jan 26 01:32:35 2026 +0100|kernel: reorder configuration options
-31f65ffef5|Álvaro Fernández Rojas|Sun Jan 25 19:34:57 2026 +0100|odhcpd: update to 25.12 Git HEAD (2026-01-19)
-</details>
