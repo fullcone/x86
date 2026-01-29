@@ -1,9 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-dece3bf36b|Felix Fietkau|Wed Jan 28 17:56:30 2026 +0000|wifi-scripts: iwinfo.uc: fix null reference in info()
-b0c75adcc5|Felix Fietkau|Mon Jan 26 17:46:04 2026 +0000|tcpdump: add PROVIDES=tcpdump to tcpdump-tiny
-90b8ed725a|Ivan Pavlov|Wed Jan 28 17:01:36 2026 +0300|openssl: update to 3.5.5
-63060b0155|Robert Marko|Tue Jan 27 13:53:37 2026 +0100|mvebu: cortex-a53: fix Methode eDPU migration to upstream DTS
-</details>
