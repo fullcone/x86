@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-06b5e42277|Aryaman Srivastava|Thu Jan 15 23:13:47 2026 +0530|ramips: add support for D-Link DIR-1360 A1
-0f9056c2bd|Anton Danilov|Thu Jan 29 14:43:17 2026 +0300|mediatek: add Motorcomm PHY support to Cudy AP3000 v1
-</details>
