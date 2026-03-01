@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-5b66b10095|Hauke Mehrtens|Thu Feb 26 20:49:17 2026 +0100|lantiq: dm200: Fix loading PHY firmware
-7d5d366404|Mieczyslaw Nalewaj|Wed Oct 29 00:23:02 2025 +0100|mt7620: workaround jal imm26 and redundant PAGE_ALIGN
-</details>

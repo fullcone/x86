@@ -13,7 +13,7 @@
 
 
 # Modify default IP
-sed -i 's/192.168.1.1/10.10.0.253/g' package/base-files/files/bin/config_generate
+sed -i 's/192.168.1.1/172.16.0.253/g' package/base-files/files/bin/config_generate
 
 # rm appfilter
 rm -rf ./feeds/packages/net/open-app-filter
@@ -120,3 +120,6 @@ chmod +x files/etc/uci-defaults/99-custom-ssh-config
 # --- End Modify SSH Configuration ---
 
 echo "DIY2 is complate!"
+# Add QEMU bridge config
+mkdir -p files/etc/qemu
+echo "allow br-lan" > files/etc/qemu/bridge.conf
