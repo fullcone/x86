@@ -1,7 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-eb9143f970|Paul Donald|Wed Mar 4 01:13:00 2026 +0100|luci-base: prevent save/traceback race for _state
-3aa6773b12|Hannu Nyman|Tue Mar 3 20:19:19 2026 +0200|treewide: backport translations from master
-</details>
