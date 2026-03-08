@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-52f5481c3b|Jonas Gorski|Wed Jan 14 20:19:30 2026 +0100|build: use STAGING_DIR for special APK package versions
-241628ab3c|Álvaro Fernández Rojas|Thu Mar 5 14:13:55 2026 +0100|kernel: net: sfp: improve Huawei MA5671a fixup
-</details>
