@@ -1,7 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-3a0dd448a7|Stan Grishin|Sun Mar 8 01:17:16 2026 +0000|luci-app-pbr: update to 1.2.2-r10
-275b59857a|Stan Grishin|Sat Mar 7 19:19:11 2026 +0000|luci-app-adblock-fast: update to 1.2.2-r10
-</details>
