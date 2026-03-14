@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-d8de9b068b|Daniel Golle|Fri Mar 13 23:15:18 2026 +0000|procd: update to git HEAD
-1353227ad3|Markus Stockhausen|Wed Mar 11 21:02:51 2026 +0100|realtek: rtl838x: fix non-functional reboot
-</details>
