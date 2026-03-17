@@ -1,9 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-837d70e179|Oliver Sedlbauer|Mon Mar 16 10:27:38 2026 +0100|ramips: mt76x8: fix bootcount init script file permissions
-940ab99796|Hauke Mehrtens|Mon Mar 16 02:40:09 2026 +0100|lantiq: adapt gpio-stp-xway node name to get clock
-412f0349e2|Hauke Mehrtens|Mon Mar 16 12:10:10 2026 +0100|Revert "package: bump odhcpd to latest HEAD 2026-03-12"
-805c8efad9|Felix Fietkau|Sat Feb 21 10:14:13 2026 +0000|mac80211: backport eMLSR/eMLMR parsing support
-</details>
