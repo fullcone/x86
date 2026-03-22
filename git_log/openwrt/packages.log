@@ -1,7 +1,0 @@
-<details> <summary> <b>packages new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-8d9f2874d|Christian Lachner|Sat Mar 21 15:37:57 2026 +0100|haproxy: update to v3.2.15
-3ced52b73|Niklas Thorild|Thu Mar 19 20:52:30 2026 +0100|telegraf: add disk plugin to small variant
-</details>

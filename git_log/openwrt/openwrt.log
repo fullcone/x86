@@ -1,6 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-5337352ffc|Rosen Penev|Fri Mar 20 17:45:39 2026 -0700|ipq40xx: add CONFIG_NVMEM_BLOCK
-</details>
