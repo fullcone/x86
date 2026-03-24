@@ -1,6 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-16775c4852|Nick Hainke|Wed Feb 18 00:42:43 2026 +0100|base-files: sysupgrade: avoid cat missing conffiles_static
-</details>
