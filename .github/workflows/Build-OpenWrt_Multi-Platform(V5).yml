@@ -732,18 +732,11 @@ jobs:
           cd openwrt
           is_complie_error=0
           echo "$(nproc) threads compile frimware"
-
-          if [[ ${{ fromJSON(github.run_attempt) }} == 3 ]]; then
-              make -j$(nproc) V=s
-              is_complie_error=${PIPESTATUS[0]}
-          else
-              make -j$(nproc)
-              is_complie_error=${PIPESTATUS[0]}
-          fi
-
-
-          # stdbuf -oL  make -j1 | perl -nE 'state $last = time(); $now = time(); chomp; print "[⬆" . ($now - $last) . "s] $_\n"; $last = $now'
-          # stdbuf -oL  make -j$(nproc) | perl -nE 'state $last = time(); $now = time(); chomp; print "[⬆" . ($now - $last) . "s] $_\n"; $last = $now'
+          set +e
+          echo "Compile firmware with -j1 V=s for full error output"
+          make -j1 V=s
+          is_complie_error=$?
+          set -e
 
           echo "complie result： $is_complie_error"
           if [ "$is_complie_error" -eq 0 ]; then
@@ -785,18 +778,9 @@ jobs:
 
           
           cd $GITHUB_WORKSPACE/openwrt/bin/targets/*/*
-          mkdir -p feeds_packages
           firmware_path=$PWD
-          cd $GITHUB_WORKSPACE/openwrt/bin/packages/*/
-          mv * $firmware_path/feeds_packages
-          cd $firmware_path
-
-          # zip directory
-          zip -r buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip */
-          # zip other files
-          find . -maxdepth 1 -type f ! -name '*-*-*' ! -name '*.zip' -exec zip buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip {} +
-          # remove other files
-          find . -mindepth 1 ! \( -name '*-*-*' -o -name '*.zip' \) -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          find . -maxdepth 1 -type f ! -name '*-*-*' -delete
 
 
           if [[ "${{ matrix.source_code_platform }}" == "lede" ]]; then
@@ -968,18 +952,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "Retry failed jobs for the ${{ fromJSON(github.run_attempt) }} time, Retry 3 times in total"
-          gh workflow run Retry_Failure_Jobs.yml -F run_id=${{ github.run_id }}
 
-  final-execution-jobs:
-    runs-on: ubuntu-latest
-    needs: [rerun-failed-jobs, job_organize_tags]
-    if: ${{ always() }}
-    steps:
-      - name: Trigger build
-        if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.MY_SECRET_PAT }}
-          repository: smallprogram/MyAction
-          event-type: openwrt_compilation_completed
-      
