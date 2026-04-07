@@ -1,7 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-f778841d02|Joshua Klinesmith|Sun Mar 29 16:19:40 2026 -0400|wifi-scripts: fix ucode erp_domain and fils_cache_id values
-ca11c6b7e1|Clemens Hopfer|Fri May 30 14:03:40 2025 +0200|base-files: MAJOR/MINOR not sequential, use DISKSEQ instead
-</details>
