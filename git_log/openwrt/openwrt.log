@@ -1,6 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-12e56ac8d4|Sven Friedmann|Mon Apr 13 18:36:37 2026 +0200|mvebu: fix kmod for switch on clearfog base/pro
-</details>

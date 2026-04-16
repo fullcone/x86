@@ -1,6 +1,0 @@
-<details> <summary> <b>lede new commit log :rocket: </b> </summary>
-
-SHA|Author|Date|Message
--|-|-|-
-b7c95ae5b|coolsnowwolf|Thu Mar 12 10:05:30 2026 +0800|mediatek: disable crypto by default for mt7988
-</details>
