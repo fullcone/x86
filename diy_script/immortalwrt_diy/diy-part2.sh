@@ -56,7 +56,7 @@ fi
 rm -rf ./feeds/packages/net/open-app-filter
 
 # Modify default IP
-sed -i 's/192.168.1.1/10.10.0.253/g' package/base-files/files/bin/config_generate
+sed -i 's/192.168.1.1/172.16.0.253/g' package/base-files/files/bin/config_generate
 
 # fixed rust host build download llvm in ci error
 # sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' package/custom_overrides/rust/Makefile
@@ -127,3 +127,6 @@ chmod +x files/etc/uci-defaults/99-custom-ssh-config
 # ./scripts/feeds install -a
 
 echo "DIY2 is complate!"
+# Add QEMU bridge config
+mkdir -p files/etc/qemu
+echo "allow br-lan" > files/etc/qemu/bridge.conf

@@ -617,15 +617,9 @@ jobs:
         if: steps.compile.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true' && steps.matrix_status.outputs.status != 'success' && !cancelled() 
         run: |
           cd $GITHUB_WORKSPACE/openwrt/bin/targets/*/*
-          mkdir -p feeds_packages
           firmware_path=$PWD
-          cd $GITHUB_WORKSPACE/openwrt/bin/packages/*/
-          mv * $firmware_path/feeds_packages
-          cd $firmware_path
-
-          zip -r buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip */
-          find . -maxdepth 1 -type f ! -name '*-*-*' ! -name '*.zip' -exec zip buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip {} +
-          find . -mindepth 1 ! \( -name '*-*-*' -o -name '*.zip' \) -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          find . -maxdepth 1 -type f ! -name '*-*-*' -delete
 
           if [[ "${{ matrix.source_code_platform }}" == "lede" ]]; then
               for file in openwrt-*; do
@@ -728,29 +722,3 @@ jobs:
           echo "Retry failed jobs for the ${{ fromJSON(github.run_attempt) }} time, Retry 3 times in total"
           gh workflow run Retry_Failure_Jobs.yml -F run_id=${{ github.run_id }}
 
-  final-execution-jobs:
-    runs-on: ubuntu-latest
-    needs: [rerun-failed-jobs, job_organize_tags]
-    if: ${{ always() && !cancelled() }}
-    steps:
-      - name: Trigger Release Update
-        if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-        uses: peter-evans/repository-dispatch@v4
-        with:
-          token: ${{ secrets.MY_SECRET_PAT }}
-          repository: smallprogram/MyAction
-          event-type: openwrt_compilation_completed
-
-      # - name: Stateful Lifecycle Check
-      #   id: lifecycle_check
-      #   run: |
-      #     chmod +x compile_script/check_lifecycle.sh
-      #     $GITHUB_WORKSPACE/compile_script/check_lifecycle.sh
-
-      # - name: Trigger Cache Update
-      #   if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-      #   uses: peter-evans/repository-dispatch@v4
-      #   with:
-      #     token: ${{ github.token }}
-      #     event-type: openwrt_cache_update_v6
-      #     client-payload: '{"force_rebuild": "${{ steps.lifecycle_check.outputs.force_rebuild }}"}'
