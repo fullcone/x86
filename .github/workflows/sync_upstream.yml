@@ -1,0 +1,430 @@
+#
+# 同步上游 OpenWrtAction 并应用自定义补丁
+# Fork from: https://github.com/smallprogram/OpenWrtAction
+#
+
+name: Sync Upstream and Patch
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 2:00 (北京时间 10:00)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.X86OPENWRT }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Backup custom files
+        run: |
+          mkdir -p /tmp/backup
+          cp .github/workflows/sync_upstream.yml /tmp/backup/
+
+      - name: Sync upstream
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/smallprogram/OpenWrtAction.git
+          fi
+          git fetch upstream
+          git reset --hard upstream/main
+
+      - name: Restore custom files
+        run: |
+          cp /tmp/backup/sync_upstream.yml .github/workflows/
+
+      - name: Keep ImmortalWrt only
+        run: |
+          set -euo pipefail
+
+          # 修改 platforms.sh，只保留 immortalwrt
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("compile_script/platforms.sh")
+          text = path.read_text(encoding="utf-8")
+          old = "source_code_platforms=(openwrt immortalwrt lede)"
+          new = "source_code_platforms=(immortalwrt)"
+
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("未找到 source_code_platforms，无法确认上游 platforms.sh 结构")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          # 删除不需要的平台
+          rm -rf diy_script/openwrt_diy
+          rm -rf diy_script/lean_diy
+          rm -rf config/openwrt_config
+          rm -rf config/leanlede_config
+          rm -rf git_log/openwrt 2>/dev/null || true
+          rm -rf git_log/lede 2>/dev/null || true
+          
+          build_workflow="$(
+            find .github/workflows -maxdepth 1 -type f \( \
+              -name 'Build_Multi_Platform(V6).yml' -o \
+              -name 'Build-OpenWrt_Multi-Platform(V6).yml' \
+            \) | sort | head -n 1
+          )"
+          if [ -z "$build_workflow" ]; then
+            echo "未找到 V6 构建工作流"
+            find .github/workflows -maxdepth 1 -type f -print
+            exit 1
+          fi
+          build_workflow_name="$(basename "$build_workflow")"
+
+          # 删除不需要的工作流（只保留 V6 构建和同步）
+          find .github/workflows -maxdepth 1 -type f -name '*.yml' \
+            ! -name "$build_workflow_name" \
+            ! -name 'sync_upstream.yml' \
+            -delete
+
+          echo "=== 只保留 ImmortalWrt ==="
+          grep "source_code_platforms" compile_script/platforms.sh
+          echo "=== 保留的工作流 ==="
+          ls -1 .github/workflows
+
+      - name: Verify QEMU and Samba4 config
+        run: |
+          echo "=== 检查 X86.config 中的 QEMU/KVM 配置 ==="
+          grep -E "qemu|kvm|virtio" config/immortalwrt_config/X86.config || echo "未找到 QEMU 相关配置"
+          echo ""
+          echo "=== 检查 X86.config 中的 Samba4 配置 ==="
+          grep -E "samba4" config/immortalwrt_config/X86.config || echo "未找到 Samba4 相关配置"
+
+      - name: Patch ImmortalWrt config packages
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          enable_config() {
+            local file="$1"
+            local symbol="$2"
+
+            if grep -Fxq "# ${symbol} is not set" "$file"; then
+              sed -i "s|^# ${symbol} is not set$|${symbol}=y|" "$file"
+            elif grep -q "^${symbol}=" "$file"; then
+              sed -i "s|^${symbol}=.*|${symbol}=y|" "$file"
+            else
+              printf '\n%s=y\n' "$symbol" >> "$file"
+            fi
+          }
+
+          immortal_configs=(config/immortalwrt_config/*.config)
+          if [ "${#immortal_configs[@]}" -eq 0 ]; then
+            echo "未找到 ImmortalWrt 配置文件"
+            exit 1
+          fi
+
+          # 为所有 ImmortalWrt 配置添加 Samba4
+          for config in "${immortal_configs[@]}"; do
+            echo "处理: $config"
+            enable_config "$config" CONFIG_PACKAGE_luci-app-samba4
+            enable_config "$config" CONFIG_PACKAGE_luci-i18n-samba4-zh-cn
+          done
+
+          x86_config="config/immortalwrt_config/X86.config"
+          if [ ! -f "$x86_config" ]; then
+            echo "未找到 X86 配置文件: $x86_config"
+            exit 1
+          fi
+
+          for symbol in \
+            CONFIG_PACKAGE_docker \
+            CONFIG_PACKAGE_dockerd \
+            CONFIG_PACKAGE_luci-app-dockerman \
+            CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn \
+            CONFIG_PACKAGE_kmod-kvm-intel \
+            CONFIG_PACKAGE_kmod-kvm-amd \
+            CONFIG_PACKAGE_qemu-x86_64-softmmu \
+            CONFIG_PACKAGE_qemu-bridge-helper \
+            CONFIG_PACKAGE_qemu-img \
+            CONFIG_PACKAGE_qemu-keymaps \
+            CONFIG_PACKAGE_qemu-firmware-efi \
+            CONFIG_PACKAGE_qemu-firmware-seabios \
+            CONFIG_PACKAGE_qemu-firmware-seavgabios \
+            CONFIG_PACKAGE_qemu-firmware-pxe \
+            CONFIG_PACKAGE_virtio-console-helper \
+            CONFIG_PACKAGE_shadow-common \
+            CONFIG_PACKAGE_shadow-useradd \
+            CONFIG_PACKAGE_shadow-usermod \
+            CONFIG_PACKAGE_shadow-userdel \
+            CONFIG_PACKAGE_shadow-groupadd \
+            CONFIG_PACKAGE_shadow-groupmod \
+            CONFIG_PACKAGE_shadow-groupdel \
+            CONFIG_PACKAGE_shadow-passwd
+          do
+            enable_config "$x86_config" "$symbol"
+          done
+
+          echo "=== X86 配置补丁摘要 ==="
+          grep -E "samba4|docker|dockerman|qemu|kvm|virtio|shadow-" "$x86_config" | grep "=y" | sed -n '1,80p'
+
+      - name: Add QEMU bridge config to diy script
+        run: |
+          set -euo pipefail
+
+          diy_part2="diy_script/immortalwrt_diy/diy-part2.sh"
+          if [ ! -f "$diy_part2" ]; then
+            echo "未找到 diy-part2.sh: $diy_part2"
+            exit 1
+          fi
+
+          if ! grep -q "files/etc/qemu/bridge.conf" "$diy_part2"; then
+            # 在 diy-part2.sh 末尾添加 QEMU 桥接配置
+            cat >> "$diy_part2" << 'EOFQEMU'
+
+          # Add QEMU bridge config
+          mkdir -p files/etc/qemu
+          echo "allow br-lan" > files/etc/qemu/bridge.conf
+          EOFQEMU
+          fi
+
+          echo "=== QEMU 桥接配置已添加 ==="
+          tail -5 "$diy_part2"
+
+      - name: Modify default IP to 172.16.0.253
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          path = Path("diy_script/immortalwrt_diy/diy-part2.sh")
+          text = path.read_text(encoding="utf-8")
+          target = "sed -i 's/192.168.1.1/172.16.0.253/g'"
+          pattern = re.compile(r"sed -i 's/192\.168\.1\.1/[^']+/g'")
+
+          text, count = pattern.subn(target, text, count=1)
+          if count == 0 and target not in text:
+              raise SystemExit("未找到默认 IP 修改逻辑，无法确认 diy-part2.sh 结构")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          echo "=== 默认 IP 已修改为 172.16.0.253 ==="
+          grep "192.168.1.1" diy_script/immortalwrt_diy/diy-part2.sh
+
+      - name: Fix workflow tokens
+        run: |
+          set -euo pipefail
+
+          build_workflow="$(
+            find .github/workflows -maxdepth 1 -type f \( \
+              -name 'Build_Multi_Platform(V6).yml' -o \
+              -name 'Build-OpenWrt_Multi-Platform(V6).yml' \
+            \) | sort | head -n 1
+          )"
+          if [ -z "$build_workflow" ]; then
+            echo "未找到 V6 构建工作流"
+            find .github/workflows -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          # 替换 token 名称
+          sed -i 's/secrets\.MY_SECRET_PAT/secrets.X86OPENWRT/g; s/secrets\.MY_ADMIN_PAT/secrets.X86OPENWRT/g' "$build_workflow"
+
+          # 删除依赖外部工作流或通知原作者仓库的 job，并修复 V6 workflow 兼容性
+          BUILD_WORKFLOW="$build_workflow" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["BUILD_WORKFLOW"])
+          lines = path.read_text(encoding="utf-8").splitlines()
+
+          def remove_job(lines, job_name):
+              marker = f"  {job_name}:"
+              try:
+                  start_idx = lines.index(marker)
+              except ValueError:
+                  return lines
+              end_idx = len(lines)
+              for idx in range(start_idx + 1, len(lines)):
+                  line = lines[idx]
+                  if line.startswith("  ") and not line.startswith("    ") and line.rstrip().endswith(":"):
+                      end_idx = idx
+                      break
+              return lines[:start_idx] + lines[end_idx:]
+
+          for job_name in ("rerun-failed-jobs", "final-execution-jobs"):
+              lines = remove_job(lines, job_name)
+
+          try:
+              start_idx = next(
+                  idx for idx, line in enumerate(lines)
+                  if "mkdir -p feeds_packages" in line
+              )
+              end_idx = next(
+                  idx for idx in range(start_idx, len(lines))
+                  if "find . -mindepth 1" in lines[idx] and "exec rm -rf" in lines[idx]
+              )
+          except StopIteration as exc:
+              raise SystemExit("未找到 V6 Organize Files 产物整理逻辑，无法确认发布目录裁剪位置") from exc
+
+          lines[start_idx:end_idx + 1] = [
+              "          firmware_path=$PWD",
+              "          find . -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +",
+              "          find . -maxdepth 1 -type f ! -name '*-*-*' -delete",
+          ]
+
+          text = "\n".join(lines) + "\n"
+
+          github_ref = "${" + "{ github.ref_name }}"
+          text = text.replace(
+              f"git pull origin {github_ref}",
+              f"git fetch origin {github_ref} && git reset --hard origin/{github_ref}",
+          )
+          text = text.replace(
+              "ghcr.io/smallprogram/openwrt-base-cache-",
+              "ghcr.io/$REPO_OWNER/openwrt-base-cache-",
+          )
+
+          github_attempt = "${" + "{ fromJSON(github.run_attempt) }}"
+          old_compile = "\n".join([
+              f"          if [[ {github_attempt} == 3 ]]; then",
+              "              make -j$(nproc) V=s",
+              "              MAKE_EXIT_CODE=$?",
+              "              exit $MAKE_EXIT_CODE",
+              "          else",
+              "              make -j$(nproc)",
+              "              MAKE_EXIT_CODE=$?",
+              "              exit $MAKE_EXIT_CODE",
+              "          fi",
+              "",
+          ])
+          matrix_source = "${" + "{ matrix.source_code_platform }}"
+          matrix_platform = "${" + "{ matrix.platform }}"
+          github_workspace = "${" + "{ github.workspace }}"
+          new_compile = "\n".join([
+              "          set -o pipefail",
+              f"          build_log=\"$GITHUB_WORKSPACE/build-{matrix_source}-{matrix_platform}.log\"",
+              "",
+              "          echo \"==== Fast parallel build with verbose logs ====\"",
+              "          make -j$(nproc) V=s 2>&1 | tee \"$build_log\"",
+              "          MAKE_EXIT_CODE=${PIPESTATUS[0]}",
+              "",
+              "          if [ \"$MAKE_EXIT_CODE\" -ne 0 ]; then",
+              "              echo \"::error::Parallel build failed with exit code $MAKE_EXIT_CODE\"",
+              "              echo \"==== Error context from parallel build log ====\"",
+              "              grep -nEi \"(make\\\\[[0-9]+\\\\]: \\\\*\\\\*\\\\*|ERROR:|Error:|FAILED:|No rule to make target|undefined reference|collect2: error|recipe for target)\" \"$build_log\" | tail -80 || true",
+              "              echo \"==== Last 300 lines from parallel build log ====\"",
+              "              tail -300 \"$build_log\" || true",
+              "              exit \"$MAKE_EXIT_CODE\"",
+              "          fi",
+              "",
+          ])
+          if old_compile in text:
+              text = text.replace(old_compile, new_compile, 1)
+          elif "Fast parallel build with verbose logs" not in text:
+              raise SystemExit("未找到 V6 编译命令，无法加入失败后的 V=s 诊断")
+
+          lines = text.splitlines()
+          checkpoint = "      - name: Checkpoint Cache (Save Base to GHCR)"
+          try:
+              checkpoint_idx = lines.index(checkpoint)
+              next_step_idx = next(
+                  (idx for idx in range(checkpoint_idx + 1, len(lines)) if lines[idx].startswith("      - name: ")),
+                  len(lines),
+              )
+              checkpoint_block = lines[checkpoint_idx:next_step_idx]
+              if "        continue-on-error: true" not in checkpoint_block:
+                  run_idx = next(
+                      idx for idx in range(checkpoint_idx + 1, next_step_idx) if lines[idx] == "        run: |"
+                  )
+                  lines.insert(run_idx, "        continue-on-error: true")
+          except (ValueError, StopIteration) as exc:
+              raise SystemExit("未找到 V6 Checkpoint Cache step，无法设置 cache 失败不影响构建") from exc
+
+          upload_logs_step = "      - name: Upload Build Logs On Failure"
+          if upload_logs_step not in lines:
+              try:
+                  compile_idx = lines.index("      - name: Compile Packages and Firmware")
+                  next_step_idx = next(
+                      idx for idx in range(compile_idx + 1, len(lines)) if lines[idx].startswith("      - name: ")
+                  )
+              except (ValueError, StopIteration) as exc:
+                  raise SystemExit("未找到 V6 编译 step，无法插入失败日志 artifact") from exc
+
+              upload_logs = [
+                  "",
+                  upload_logs_step,
+                  "        if: failure() && steps.compile.outcome == 'failure'",
+                  "        uses: actions/upload-artifact@v7",
+                  "        with:",
+                  f"          name: build_logs_{matrix_source}_{matrix_platform}",
+                  "          path: |",
+                  f"            {github_workspace}/build-*.log",
+                  "          if-no-files-found: ignore",
+                  "          retention-days: 7",
+              ]
+              lines[next_step_idx:next_step_idx] = upload_logs
+
+          text = "\n".join(lines) + "\n"
+          forbidden = [
+              "secrets.MY_SECRET_PAT",
+              "secrets.MY_ADMIN_PAT",
+              "Retry_Failure_Jobs.yml",
+              f"git pull origin {github_ref}",
+              "ghcr.io/smallprogram/openwrt-base-cache-",
+              "  rerun-failed-jobs:",
+              "  final-execution-jobs:",
+          ]
+          found = [item for item in forbidden if item in text]
+          if found:
+              raise SystemExit(f"V6 workflow patch 后仍有残留: {found}")
+
+          required = [
+              "openwrt_source_update_v6",
+              "job_compile_and_upload:",
+              "echo \"FIRMWARE=$firmware_path\" >> $GITHUB_OUTPUT",
+              "ghcr.io/$REPO_OWNER/openwrt-base-cache-",
+              "continue-on-error: true",
+              "Fast parallel build with verbose logs",
+              "Upload Build Logs On Failure",
+              f"git fetch origin {github_ref} && git reset --hard origin/{github_ref}",
+          ]
+          missing = [item for item in required if item not in text]
+          if missing:
+              raise SystemExit(f"V6 workflow patch 后缺少关键结构: {missing}")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          echo "=== V6 workflow patch summary ==="
+          grep -E "openwrt_source_update_v6|job_compile_and_upload|git fetch origin|FIRMWARE=" "$build_workflow" | sed -n '1,20p'
+
+      - name: Commit and push
+        run: |
+          git add .
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: sync upstream, keep immortalwrt only, add samba4"
+            git push --force
+          else
+            echo "No changes"
+          fi
+
+      - name: Trigger build workflow
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/dispatches" \
+            -f event_type="openwrt_source_update_v6"
+        env:
+          GH_TOKEN: ${{ secrets.X86OPENWRT }}
