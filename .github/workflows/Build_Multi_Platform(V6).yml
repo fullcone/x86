@@ -443,7 +443,7 @@ jobs:
 
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           PLATFORM_NAME=$(echo "${{ matrix.source_code_platform }}-${{ matrix.platform }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/smallprogram/openwrt-base-cache-$PLATFORM_NAME:latest"
+          IMAGE_NAME="ghcr.io/$REPO_OWNER/openwrt-base-cache-$PLATFORM_NAME:latest"
           
           if docker pull $IMAGE_NAME; then
             echo "==== 发现缓存，开始极速提取 ===="
@@ -504,6 +504,7 @@ jobs:
 
       - name: Checkpoint Cache (Save Base to GHCR)
         if: steps.matrix_status.outputs.status != 'success' && steps.compile_base.outcome == 'success'
+        continue-on-error: true
         run: |
           echo "==== 智能探测 Base 是否更新 ===="
           cd /workdir
@@ -579,7 +580,7 @@ jobs:
           df -hT
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           PLATFORM_NAME=$(echo "${{ matrix.source_code_platform }}-${{ matrix.platform }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/smallprogram/openwrt-base-cache-$PLATFORM_NAME:latest"
+          IMAGE_NAME="ghcr.io/$REPO_OWNER/openwrt-base-cache-$PLATFORM_NAME:latest"
 
           docker build -t $IMAGE_NAME .
           docker push $IMAGE_NAME
@@ -602,30 +603,40 @@ jobs:
           df -h
           # chmod +x $GITHUB_WORKSPACE/${{ matrix.value.DIY_P3_SH }} || true
 
-          if [[ ${{ fromJSON(github.run_attempt) }} == 3 ]]; then
-              make -j$(nproc) V=s
-              MAKE_EXIT_CODE=$?
-              exit $MAKE_EXIT_CODE
-          else
-              make -j$(nproc)
-              MAKE_EXIT_CODE=$?
-              exit $MAKE_EXIT_CODE
+          set -o pipefail
+          build_log="$GITHUB_WORKSPACE/build-${{ matrix.source_code_platform }}-${{ matrix.platform }}.log"
+
+          echo "==== Fast parallel build with verbose logs ===="
+          make -j$(nproc) V=s 2>&1 | tee "$build_log"
+          MAKE_EXIT_CODE=${PIPESTATUS[0]}
+
+          if [ "$MAKE_EXIT_CODE" -ne 0 ]; then
+              echo "::error::Parallel build failed with exit code $MAKE_EXIT_CODE"
+              echo "==== Error context from parallel build log ===="
+              grep -nEi "(make\\[[0-9]+\\]: \\*\\*\\*|ERROR:|Error:|FAILED:|No rule to make target|undefined reference|collect2: error|recipe for target)" "$build_log" | tail -80 || true
+              echo "==== Last 300 lines from parallel build log ===="
+              tail -300 "$build_log" || true
+              exit "$MAKE_EXIT_CODE"
           fi
 
+
+      - name: Upload Build Logs On Failure
+        if: failure() && steps.compile.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: build_logs_${{ matrix.source_code_platform }}_${{ matrix.platform }}
+          path: |
+            ${{ github.workspace }}/build-*.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Organize Files
         id: organize
         if: steps.compile.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true' && steps.matrix_status.outputs.status != 'success' && !cancelled() 
         run: |
           cd $GITHUB_WORKSPACE/openwrt/bin/targets/*/*
-          mkdir -p feeds_packages
           firmware_path=$PWD
-          cd $GITHUB_WORKSPACE/openwrt/bin/packages/*/
-          mv * $firmware_path/feeds_packages
-          cd $firmware_path
-
-          zip -r buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip */
-          find . -maxdepth 1 -type f ! -name '*-*-*' ! -name '*.zip' -exec zip buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip {} +
-          find . -mindepth 1 ! \( -name '*-*-*' -o -name '*.zip' \) -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          find . -maxdepth 1 -type f ! -name '*-*-*' -delete
 
           if [[ "${{ matrix.source_code_platform }}" == "lede" ]]; then
               for file in openwrt-*; do
@@ -686,7 +697,7 @@ jobs:
           fetch-depth: 0
 
       - name: Pull the latest changes
-        run: git pull origin ${{ github.ref_name }}
+        run: git fetch origin ${{ github.ref_name }} && git reset --hard origin/${{ github.ref_name }}
 
       - name: Download Tags
         uses: actions/download-artifact@v8
@@ -715,42 +726,3 @@ jobs:
           tag_name: ${{ needs.job_init.outputs.output_release_tag }}
           body_path: release.txt
 
-  rerun-failed-jobs:
-    runs-on: ubuntu-latest
-    needs: [job_init, job_source_init, job_generate_release_tag, job_compile_and_upload, job_organize_tags]
-    if: failure() && fromJSON(github.run_attempt) < 3  && !cancelled()
-    steps:
-      - name: Rerun failed jobs in the current workflow
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "Retry failed jobs for the ${{ fromJSON(github.run_attempt) }} time, Retry 3 times in total"
-          gh workflow run Retry_Failure_Jobs.yml -F run_id=${{ github.run_id }}
-
-  final-execution-jobs:
-    runs-on: ubuntu-latest
-    needs: [rerun-failed-jobs, job_organize_tags]
-    if: ${{ always() && !cancelled() }}
-    steps:
-      - name: Trigger Release Update
-        if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-        uses: peter-evans/repository-dispatch@v4
-        with:
-          token: ${{ secrets.MY_SECRET_PAT }}
-          repository: smallprogram/MyAction
-          event-type: openwrt_compilation_completed
-
-      # - name: Stateful Lifecycle Check
-      #   id: lifecycle_check
-      #   run: |
-      #     chmod +x compile_script/check_lifecycle.sh
-      #     $GITHUB_WORKSPACE/compile_script/check_lifecycle.sh
-
-      # - name: Trigger Cache Update
-      #   if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-      #   uses: peter-evans/repository-dispatch@v4
-      #   with:
-      #     token: ${{ github.token }}
-      #     event-type: openwrt_cache_update_v6
-      #     client-payload: '{"force_rebuild": "${{ steps.lifecycle_check.outputs.force_rebuild }}"}'
