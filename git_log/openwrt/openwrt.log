@@ -1,9 +1,0 @@
-<details> <summary> <b>openwrt new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/openwrt/openwrt/compare/8dff4c9a340371b1e1f10b03ac06340d15f60e86...54cced5b2f2c3b6f92a1b81ca3764349a93f96af)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-54cced5b2f|dastarothx|Sat May 23 12:40:20 2026 -0400|wifi-scripts: ucode: fix null dereference for 6GHz-only radios
-</details>
