@@ -1,9 +1,0 @@
-<details> <summary> <b>lede new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/coolsnowwolf/lede/compare/9e52facf4d199ce99a2bdfa4061f9c5c2e6ec3a1...fc71ece17d477b0e4f322511defebfb73931dcaa)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-fc71ece17|aiamadeus|Fri May 15 18:05:10 2026 +0800|kernel/modules: sync upstream
-</details>
