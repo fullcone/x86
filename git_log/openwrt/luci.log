@@ -1,9 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/openwrt/luci/compare/44618b5b53d9bdad5cd489e82e29688b4d0862c1...9ccd99b5898457e5ef39dc21aea226d7fb6e5c7e)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-9ccd99b589|Stan Grishin|Mon Jun 15 01:45:37 2026 +0000|luci-app-adblock-fast: update to 1.2.4-2
-</details>
