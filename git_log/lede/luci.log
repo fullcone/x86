@@ -1,9 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/coolsnowwolf/luci/compare/17c28ff96a3244d87845900630f2061e18e17328...900aad8ab11cc50a6135ea3d854a55581a2fdf14)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-900aad8ab1|coolsnowwolf|Thu Jun 18 11:11:00 2026 +0800|luci-mod-system: add Docker opt mount target
-</details>
