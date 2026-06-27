@@ -484,7 +484,7 @@ jobs:
 
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           PLATFORM_NAME=$(echo "${{ matrix.source_code_platform }}-${{ matrix.platform }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/smallprogram/openwrt-base-cache-$PLATFORM_NAME:latest"
+          IMAGE_NAME="ghcr.io/$REPO_OWNER/openwrt-base-cache-$PLATFORM_NAME:latest"
           
           if docker pull $IMAGE_NAME; then
             echo "==== 发现缓存，开始极速提取 ===="
@@ -553,6 +553,7 @@ jobs:
 
       - name: Checkpoint Cache (Save Base to GHCR)
         if: steps.matrix_status.outputs.status != 'success' && steps.compile_base.outcome == 'success'
+        continue-on-error: true
         run: |
           echo "==== 智能探测 Base 是否更新 ===="
           cd /workdir
@@ -628,7 +629,7 @@ jobs:
           df -hT
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           PLATFORM_NAME=$(echo "${{ matrix.source_code_platform }}-${{ matrix.platform }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/smallprogram/openwrt-base-cache-$PLATFORM_NAME:latest"
+          IMAGE_NAME="ghcr.io/$REPO_OWNER/openwrt-base-cache-$PLATFORM_NAME:latest"
 
           docker build -t $IMAGE_NAME .
           docker push $IMAGE_NAME
@@ -651,30 +652,70 @@ jobs:
           df -h
           # chmod +x $GITHUB_WORKSPACE/${{ matrix.value.DIY_P3_SH }} || true
 
-          if [[ ${{ fromJSON(github.run_attempt) }} == 3 ]]; then
-              make -j$(nproc) V=s
-              MAKE_EXIT_CODE=$?
-              exit $MAKE_EXIT_CODE
-          else
-              make -j$(nproc)
-              MAKE_EXIT_CODE=$?
-              exit $MAKE_EXIT_CODE
+          set -o pipefail
+          build_log="$GITHUB_WORKSPACE/build-${{ matrix.source_code_platform }}-${{ matrix.platform }}.log"
+
+          echo "==== Fast parallel build, full log is written to $build_log ===="
+          : > "$build_log"
+          (
+              while true; do
+                  sleep 60
+                  echo "::notice::Build still running at $(date -u +%H:%M:%S). Log size: $(du -h "$build_log" | awk '{print $1}')"
+                  tail -5 "$build_log" | sed 's/^/[build-tail] /' || true
+              done
+          ) &
+          heartbeat_pid=$!
+          trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
+
+          set +e
+          make -j$(nproc) V=s > "$build_log" 2>&1
+          MAKE_EXIT_CODE=$?
+          set -e
+          kill "$heartbeat_pid" 2>/dev/null || true
+          wait "$heartbeat_pid" 2>/dev/null || true
+          trap - EXIT
+
+          if [ "$MAKE_EXIT_CODE" -ne 0 ]; then
+              echo "::error::Parallel build failed with exit code $MAKE_EXIT_CODE"
+              echo "==== Error context from parallel build log ===="
+              grep -nEi "(make\\[[0-9]+\\]: \\*\\*\\*|ERROR:|Error:|FAILED:|No rule to make target|undefined reference|collect2: error|recipe for target|fatal error:|No space left on device|not found)" "$build_log" | tail -120 || true
+              echo "==== Last 500 lines from parallel build log ===="
+              tail -500 "$build_log" || true
+              exit "$MAKE_EXIT_CODE"
           fi
 
+
+      - name: Upload Build Logs On Failure
+        if: failure() && steps.compile.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: build_logs_${{ matrix.source_code_platform }}_${{ matrix.platform }}
+          path: |
+            ${{ github.workspace }}/build-*.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Organize Files
         id: organize
         if: steps.compile.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true' && steps.matrix_status.outputs.status != 'success' && !cancelled() 
         run: |
           cd $GITHUB_WORKSPACE/openwrt/bin/targets/*/*
-          mkdir -p feeds_packages
           firmware_path=$PWD
-          cd $GITHUB_WORKSPACE/openwrt/bin/packages/*/
-          mv * $firmware_path/feeds_packages
-          cd $firmware_path
+          find . -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          find . -maxdepth 1 -type f ! -name '*-*-*' -delete
 
-          zip -r buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip */
-          find . -maxdepth 1 -type f ! -name '*-*-*' ! -name '*.zip' -exec zip buildinfo_${{ matrix.source_code_platform }}_${{ matrix.platform }}.zip {} +
-          find . -mindepth 1 ! \( -name '*-*-*' -o -name '*.zip' \) -exec rm -rf {} +
+          if [[ "${{ matrix.platform }}" == "X86_VMware" ]]; then
+              for file in immortalwrt-x86-64-generic*; do
+                  [ -f "$file" ] || continue
+                  mv "$file" "${file/immortalwrt-x86-64-generic/immortalwrt-x86-64-generic-vmware}"
+              done
+              echo "==== Keep VMware release artifacts only ===="
+              find . -maxdepth 1 -type f \
+                  ! -name 'immortalwrt-x86-64-generic-vmware*combined*.vmdk*' \
+                  ! -name 'immortalwrt-x86-64-generic-vmware.manifest' \
+                  ! -name 'immortalwrt-x86-64-generic-vmware-kernel.bin' \
+                  -delete
+              ls -lh
+          fi
 
           if [[ "${{ matrix.source_code_platform }}" == "lede" ]]; then
               for file in openwrt-*; do
@@ -693,17 +734,6 @@ jobs:
       #     name: release_tag
       #     path: release_tag_download
 
-      - name: Upload Firmware To Release Directly
-        if: steps.organize.outcome == 'success' && steps.matrix_status.outputs.status != 'success'
-        uses: softprops/action-gh-release@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tag_name: ${{ needs.job_init.outputs.output_release_tag }}
-          # body_path: release_tag_download/release.txt
-          files: |
-            ${{ steps.organize.outputs.FIRMWARE }}/*
-
       - name: Upload Firmware Directory To Artifact (Backup)
         uses: actions/upload-artifact@v7
         if: steps.organize.outcome == 'success' && env.UPLOAD_ARTIFACT == 'true' && steps.matrix_status.outputs.status != 'success' && !cancelled()
@@ -712,6 +742,40 @@ jobs:
           path: ${{ steps.organize.outputs.FIRMWARE }}
           overwrite: true
 
+
+      - name: Upload Firmware To Release Directly
+        if: steps.organize.outcome == 'success' && steps.matrix_status.outputs.status != 'success'
+        continue-on-error: ${{ matrix.platform == 'X86_VMware' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.job_init.outputs.output_release_tag }}
+          FIRMWARE_DIR: ${{ steps.organize.outputs.FIRMWARE }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$FIRMWARE_DIR"/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::warning::No firmware files found to upload: $FIRMWARE_DIR"
+            exit 0
+          fi
+          for file in "${files[@]}"; do
+            [ -f "$file" ] || continue
+            name="$(basename "$file")"
+            echo "Uploading $name to release $RELEASE_TAG"
+            success=0
+            for attempt in 1 2 3; do
+              if gh release upload "$RELEASE_TAG" "$file" --repo "$GITHUB_REPOSITORY" --clobber; then
+                success=1
+                break
+              fi
+              echo "::warning::Upload failed for $name (attempt $attempt/3)"
+              sleep $((attempt * 20))
+            done
+            if [ "$success" -ne 1 ]; then
+              echo "::error::Failed to upload $name after 3 attempts"
+              exit 1
+            fi
+          done
       - name: Upload Bin Directory To Artifact (Backup)
         uses: actions/upload-artifact@v7
         if: steps.compile.outcome == 'success' && env.UPLOAD_BIN_DIR == 'true' && steps.matrix_status.outputs.status != 'success' && !cancelled()
@@ -720,8 +784,1048 @@ jobs:
           path: openwrt/bin
           overwrite: true
 
+
+  job_build_x86_installer_iso:
+    needs: [job_init, job_compile_and_upload]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    name: Build-X86-Installer-ISO
+    steps:
+      - name: Download X86 Firmware Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: immortalwrt_X86_firmware
+          path: firmware
+
+      - name: Build X86 Installer ISO
+        id: build_x86_installer_iso
+        env:
+          FIRMWARE_DIR: ${{ github.workspace }}/firmware
+          ISO_OUTPUT_DIR: ${{ github.workspace }}/installer-output
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$ISO_OUTPUT_DIR"
+          cd "$FIRMWARE_DIR"
+          payload="$(find . -maxdepth 1 -type f -name 'immortalwrt-x86-64-generic-ext4-combined-efi.img.gz' -print -quit)"
+          if [ -z "$payload" ]; then
+            echo "::error::未找到 X86 ext4 EFI combined 镜像，无法生成 true mdadm RAID1 installer ISO"
+            ls -lah
+            exit 1
+          fi
+          payload="${payload#./}"
+          payload_name="$(basename "$payload")"
+          iso_name="${payload_name%.img.gz}-mdadm-raid1-installer.iso"
+          echo "Using payload: $payload_name"
+          echo "Installer ISO: $iso_name"
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends busybox-static cpio gzip kbd kmod grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools mdadm parted dosfstools gdisk e2fsprogs file binutils zstd
+          df -h / /tmp "$RUNNER_TEMP" || true
+          generic_kernel_pkg="$(apt-cache depends linux-image-generic | awk '/Depends: linux-image-[0-9].*-generic/ {print $2; exit}')"
+          if [ -n "$generic_kernel_pkg" ]; then
+            generic_kernel_version="${generic_kernel_pkg#linux-image-}"
+            sudo apt-get install -y --no-install-recommends "$generic_kernel_pkg" "linux-modules-extra-$generic_kernel_version"
+            df -h / /tmp "$RUNNER_TEMP" || true
+          else
+            echo "::warning::Cannot resolve linux-image-generic target; falling back to runner kernel"
+          fi
+          sudo apt-get clean
+
+          installer_script="$RUNNER_TEMP/build_mdraid_installer_iso.sh"
+          cat > "$installer_script" <<'MDRAID_INSTALLER_SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          
+          if [[ $# -lt 1 ]]; then
+            echo "Usage: $0 <openwrt-x86-combined-efi.img.gz> [output-dir]" >&2
+            exit 2
+          fi
+          
+          PAYLOAD="$1"
+          OUTDIR="${2:-$(dirname "$PAYLOAD")}"
+          
+          if [[ ! -f "$PAYLOAD" ]]; then
+            echo "Payload not found: $PAYLOAD" >&2
+            exit 1
+          fi
+          
+          mkdir -p "$OUTDIR"
+          payload_name="$(basename "$PAYLOAD")"
+          iso_name="${payload_name%.img.gz}-mdadm-raid1-installer.iso"
+          iso_path="$OUTDIR/$iso_name"
+          
+          required_tools=(
+            awk basename busybox cpio depmod e2fsck file find gzip ldd mdadm mkfs.vfat
+            loadkeys modinfo mount partprobe readelf resize2fs sgdisk sha256sum umount xorriso
+            grub-mkrescue grub-mkstandalone zstd
+          )
+          for tool in "${required_tools[@]}"; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "Missing required tool: $tool" >&2
+              exit 1
+            fi
+          done
+          
+          workdir="$(mktemp -d)"
+          cleanup() {
+            set +e
+            umount "$workdir/src_root" "$workdir/src_boot" 2>/dev/null
+            rm -rf "$workdir"
+          }
+          trap cleanup EXIT
+          
+          iso_root="$workdir/iso"
+          installer_root="$workdir/installer-initramfs"
+          raid_root="$workdir/raid-initramfs"
+          src_root="$workdir/src_root"
+          src_boot="$workdir/src_boot"
+          src_img="$workdir/openwrt.img"
+          
+          mkdir -p "$iso_root/boot/grub" "$iso_root/payload" "$installer_root" "$raid_root" "$src_root" "$src_boot"
+          
+          echo "Decompressing payload for metadata extraction..."
+          gzip -dc "$PAYLOAD" > "$src_img"
+          
+          part_start() {
+            local part="$1"
+            sgdisk -i "$part" "$src_img" | awk -F: '/First sector/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); split($2, a, /[ \t]+/); print a[1]; exit}'
+          }
+          
+          part_end() {
+            local part="$1"
+            sgdisk -i "$part" "$src_img" | awk -F: '/Last sector/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); split($2, a, /[ \t]+/); print a[1]; exit}'
+          }
+          
+          boot_start="$(part_start 1)"
+          boot_end="$(part_end 1)"
+          root_start="$(part_start 2)"
+          root_end="$(part_end 2)"
+          boot_size="$(((boot_end - boot_start + 1) * 512))"
+          root_size="$(((root_end - root_start + 1) * 512))"
+          
+          mount -o ro,loop,offset="$((boot_start * 512))",sizelimit="$boot_size" "$src_img" "$src_boot"
+          mount -o ro,loop,offset="$((root_start * 512))",sizelimit="$root_size" "$src_img" "$src_root"
+          
+          openwrt_kernel_version="$(find "$src_root/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
+          if [[ -z "$openwrt_kernel_version" ]]; then
+            echo "Cannot find OpenWrt kernel module version." >&2
+            exit 1
+          fi
+          
+          copy_binary_with_libs() {
+            local bin="$1"
+            local root="$2"
+            local dest
+          
+            if [[ ! -x "$bin" ]]; then
+              echo "Binary not executable: $bin" >&2
+              exit 1
+            fi
+          
+            dest="$root$bin"
+            mkdir -p "$(dirname "$dest")"
+            cp -L "$bin" "$dest"
+          
+            ldd "$bin" 2>/dev/null | while read -r line; do
+              local lib
+              lib="$(printf '%s\n' "$line" | awk '
+                /=> \// {print $3; next}
+                /^\// {print $1; next}
+              ')"
+              [[ -n "${lib:-}" && -e "$lib" ]] || continue
+              mkdir -p "$root$(dirname "$lib")"
+              cp -L "$lib" "$root$lib"
+            done
+          
+            local interp
+            interp="$(readelf -l "$bin" 2>/dev/null | awk -F': ' '/interpreter/ {gsub(/]$/, "", $2); print $2; exit}')"
+            if [[ -n "${interp:-}" && -e "$interp" ]]; then
+              mkdir -p "$root$(dirname "$interp")"
+              cp -L "$interp" "$root$interp"
+            fi
+          }
+          
+          copy_openwrt_binary_with_libs() {
+            local rel="$1"
+            local root="$2"
+            local src="$src_root$rel"
+            local dest="$root$rel"
+          
+            mkdir -p "$(dirname "$dest")"
+            cp -L "$src" "$dest"
+          
+            readelf -d "$src" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}' | while read -r lib; do
+              [[ -n "$lib" ]] || continue
+              if [[ -e "$src_root/lib/$lib" ]]; then
+                mkdir -p "$root/lib"
+                cp -L "$src_root/lib/$lib" "$root/lib/$lib"
+              fi
+            done
+          
+            local interp
+            interp="$(readelf -l "$src" 2>/dev/null | awk -F': ' '/interpreter/ {gsub(/]$/, "", $2); print $2; exit}')"
+            if [[ -n "${interp:-}" && -e "$src_root$interp" ]]; then
+              mkdir -p "$root$(dirname "$interp")"
+              cp -L "$src_root$interp" "$root$interp"
+            fi
+          }
+          
+          make_busybox_root() {
+            local root="$1"
+            shift
+            mkdir -p "$root/bin" "$root/sbin" "$root/dev" "$root/proc" "$root/sys" "$root/run" "$root/tmp"
+            cp "$(command -v busybox)" "$root/bin/busybox"
+            chmod +x "$root/bin/busybox"
+            for applet in "$@"; do
+              ln -sf /bin/busybox "$root/bin/$applet"
+            done
+            ln -sf /bin/busybox "$root/sbin/mdev"
+            ln -sf /bin/busybox "$root/sbin/reboot"
+            ln -sf /bin/busybox "$root/sbin/switch_root"
+          }
+          
+          echo "Building OpenWrt RAID boot initramfs..."
+          make_busybox_root "$raid_root" \
+            sh ash cat clear echo find grep head insmod ln ls mkdir mount printf ps readlink reboot \
+            mkfifo rm sed sh sleep sort stty switch_root sync tail tee test touch tr true umount uname
+          mkdir -p "$raid_root/lib/modules/$openwrt_kernel_version" "$raid_root/sbin" "$raid_root/etc"
+          copy_openwrt_binary_with_libs /sbin/mdadm "$raid_root"
+          
+          for lib in libc.so ld-musl-x86_64.so.1 libgcc_s.so.1; do
+            if [[ -e "$src_root/lib/$lib" ]]; then
+              cp -L "$src_root/lib/$lib" "$raid_root/lib/$lib"
+            fi
+          done
+          
+          for module in libcrc32c.ko md-mod.ko raid1.ko; do
+            if [[ -f "$src_root/lib/modules/$openwrt_kernel_version/$module" ]]; then
+              cp "$src_root/lib/modules/$openwrt_kernel_version/$module" "$raid_root/lib/modules/$openwrt_kernel_version/$module"
+            fi
+          done
+          
+          cat > "$raid_root/init" <<'RAIDINIT'
+          #!/bin/sh
+          export PATH=/bin:/sbin
+          
+          mount -t proc proc /proc 2>/dev/null || true
+          mount -t sysfs sysfs /sys 2>/dev/null || true
+          mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+          mkdir -p /run /tmp /newroot /dev/md
+          mount -t tmpfs tmpfs /run 2>/dev/null || true
+          mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+          
+          setup_dual_output_console() {
+            [ -c /dev/ttyS0 ] && stty -F /dev/ttyS0 115200 2>/dev/null || true
+          
+            outputs=""
+            if [ -c /dev/tty1 ]; then
+              outputs="$outputs /dev/tty1"
+            elif [ -c /dev/tty0 ]; then
+              outputs="$outputs /dev/tty0"
+            fi
+            [ -c /dev/ttyS0 ] && outputs="$outputs /dev/ttyS0"
+          
+            if [ -n "$outputs" ]; then
+              rm -f /tmp/console-tee
+              mkfifo /tmp/console-tee 2>/dev/null || true
+              if [ -p /tmp/console-tee ]; then
+                tee $outputs < /tmp/console-tee >/dev/null &
+                exec > /tmp/console-tee 2>&1
+              fi
+            fi
+          }
+          
+          setup_dual_output_console
+          
+          KVER="$(uname -r)"
+          for module in libcrc32c md-mod raid1; do
+            if [ -f "/lib/modules/$KVER/$module.ko" ]; then
+              insmod "/lib/modules/$KVER/$module.ko" 2>/dev/null || true
+            fi
+          done
+          
+          mdev -s 2>/dev/null || true
+          sleep 2
+          
+          devices=""
+          for dev in /dev/sd*[0-9] /dev/vd*[0-9] /dev/xvd*[0-9] /dev/nvme[0-9]n[0-9]p[0-9] /dev/mmcblk[0-9]p[0-9]; do
+            [ -b "$dev" ] || continue
+            if mdadm --examine "$dev" 2>/dev/null | grep -q 'Raid Level : raid1'; then
+              devices="$devices $dev"
+            fi
+          done
+          
+          if [ -z "$devices" ]; then
+            echo "No mdadm member partitions found."
+            exec sh
+          fi
+          
+          mdadm --assemble /dev/md/openwrt-root $devices --run 2>/tmp/mdadm.log || \
+          mdadm --assemble /dev/md0 $devices --run 2>>/tmp/mdadm.log || {
+            echo "Failed to assemble OpenWrt RAID1 root."
+            cat /tmp/mdadm.log
+            exec sh
+          }
+          
+          mdev -s 2>/dev/null || true
+          sleep 1
+          
+          rootdev=""
+          for candidate in /dev/md/openwrt-root /dev/md0 /dev/md/* /dev/md[0-9]*; do
+            [ -b "$candidate" ] || continue
+            if mount -o rw "$candidate" /newroot 2>/tmp/mount-root.log; then
+              rootdev="$candidate"
+              break
+            fi
+          done
+          
+          if [ -z "$rootdev" ]; then
+            echo "Failed to mount assembled RAID root."
+            cat /tmp/mount-root.log 2>/dev/null || true
+            cat /proc/mdstat
+            exec sh
+          fi
+          
+          mount -o move /proc /newroot/proc 2>/dev/null || true
+          mount -o move /sys /newroot/sys 2>/dev/null || true
+          mount -o move /dev /newroot/dev 2>/dev/null || true
+          exec switch_root /newroot /sbin/init
+          RAIDINIT
+          chmod +x "$raid_root/init"
+          (cd "$raid_root" && find . -print0 | cpio --null -o --format=newc | gzip -9) > "$iso_root/payload/raid-initramfs.gz"
+          
+          echo "Building installer initramfs..."
+          make_busybox_root "$installer_root" \
+            sh ash awk basename cat clear cut dd dirname dmesg echo false find free grep gunzip gzip head hexdump \
+            insmod kill ln ls lsmod mkdir mkfifo mknod mount mv printf ps readlink reboot rm rmdir rmmod sed \
+            seq sha256sum sleep sort stty sync tail tee test touch tr true umount uname wc
+          mkdir -p "$installer_root/etc" "$installer_root/lib/modules" "$installer_root/usr/sbin" "$installer_root/usr/bin" "$installer_root/sbin"
+          
+          kernel_path="$(ls -1 /boot/vmlinuz-*-generic 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [[ -z "$kernel_path" ]]; then
+            kernel_version="$(uname -r)"
+            kernel_path="/boot/vmlinuz-$kernel_version"
+          else
+            kernel_version="${kernel_path##*/vmlinuz-}"
+          fi
+          if [[ ! -f "$kernel_path" ]]; then
+            echo "No usable installer kernel found under /boot." >&2
+            exit 1
+          fi
+          cp "$kernel_path" "$iso_root/boot/vmlinuz"
+          
+          if [[ -d "/lib/modules/$kernel_version" ]]; then
+            copy_installer_module() {
+              local module="$1"
+              local deps
+              deps="$(modprobe --show-depends -S "$kernel_version" "$module" 2>/dev/null | awk '/^insmod / {print $2}')" || {
+                echo "::warning::installer kernel module not available: $module"
+                return 0
+              }
+              if [[ -z "$deps" ]]; then
+                echo "::warning::installer kernel module has no loadable dependency path: $module"
+                return 0
+              fi
+              while read -r src; do
+                  [[ -f "$src" ]] || continue
+                  local dest="$installer_root$src"
+                  mkdir -p "$(dirname "$dest")"
+                  if [[ ! -e "$dest" && ! -e "${dest%.zst}" ]]; then
+                    cp "$src" "$dest"
+                    if [[ "$dest" == *.ko.zst ]]; then
+                      zstd -d --rm "$dest" >/dev/null || {
+                        echo "::warning::failed to decompress installer module: $src"
+                        rm -f "$dest"
+                        continue
+                      }
+                    fi
+                  fi
+              done <<< "$deps"
+            }
+          
+            installer_modules=(
+              isofs udf sr_mod cdrom loop
+              ahci libahci ata_piix libata scsi_mod sd_mod sg
+              mpt3sas megaraid_sas hpsa smartpqi aacraid mpi3mr pm80xx 3w-sas 3w-9xxx 3w-xxxx arcmsr
+              usb_storage uas xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd
+              hid hid_generic usbhid usbkbd atkbd i8042 libps2 serio serio_raw evdev
+              nvme nvme_core
+              virtio virtio_pci virtio_blk virtio_scsi virtio_ring
+              vfat nls_cp437 nls_iso8859-1 ext4 mbcache jbd2
+              md-mod raid1 libcrc32c
+            )
+            for module in "${installer_modules[@]}"; do
+              copy_installer_module "$module"
+            done
+            depmod -b "$installer_root" "$kernel_version" || true
+          fi
+          
+          for bin in \
+            /usr/sbin/modprobe /usr/bin/kmod \
+            /usr/sbin/mdadm /usr/sbin/sgdisk /usr/sbin/partprobe /usr/sbin/wipefs \
+            /usr/sbin/e2fsck /usr/sbin/resize2fs /usr/sbin/blkid /usr/sbin/mkfs.vfat \
+            /usr/bin/loadkeys /usr/bin/sha256sum /usr/bin/awk /usr/bin/sed /usr/bin/grep /usr/bin/sort /usr/bin/head /usr/bin/tail; do
+            [[ -x "$bin" ]] && copy_binary_with_libs "$bin" "$installer_root"
+          done
+          cat > "$installer_root/etc/no-tab.kmap" <<'KEYMAP'
+          keycode 15 = VoidSymbol
+          KEYMAP
+          
+          cp "$PAYLOAD" "$iso_root/payload/openwrt.img.gz"
+          printf '%s\n' "$payload_name" > "$iso_root/payload/name"
+          sha256sum "$PAYLOAD" | awk '{print $1}' > "$iso_root/payload/sha256"
+          printf '%s\n' "$root_start" > "$iso_root/payload/root-start-sector"
+          
+          cat > "$workdir/installed-efi-grub.cfg" <<'EFICFG'
+          if [ -e (hd0,gpt1)/boot/grub/grub.cfg ]; then
+            set root=(hd0,gpt1)
+            set prefix=(hd0,gpt1)/boot/grub
+            set boot_source=efi-fallback-hd0-gpt1
+            configfile /boot/grub/grub.cfg
+          fi
+          if [ -e (hd1,gpt1)/boot/grub/grub.cfg ]; then
+            set root=(hd1,gpt1)
+            set prefix=(hd1,gpt1)/boot/grub
+            set boot_source=efi-fallback-hd1-gpt1
+            configfile /boot/grub/grub.cfg
+          fi
+          if [ -e (hd2,gpt1)/boot/grub/grub.cfg ]; then
+            set root=(hd2,gpt1)
+            set prefix=(hd2,gpt1)/boot/grub
+            set boot_source=efi-fallback-hd2-gpt1
+            configfile /boot/grub/grub.cfg
+          fi
+          if [ -e (hd3,gpt1)/boot/grub/grub.cfg ]; then
+            set root=(hd3,gpt1)
+            set prefix=(hd3,gpt1)/boot/grub
+            set boot_source=efi-fallback-hd3-gpt1
+            configfile /boot/grub/grub.cfg
+          fi
+          echo "Could not locate /boot/grub/grub.cfg on kernel boot partition."
+          echo "Try: configfile (hd0,gpt1)/boot/grub/grub.cfg"
+          sleep --interruptible 30
+          EFICFG
+          grub-mkstandalone -O x86_64-efi \
+            --modules="part_gpt fat ext2 normal configfile linux gzio test sleep serial terminal" \
+            -o "$iso_root/payload/bootx64.efi" \
+            "boot/grub/grub.cfg=$workdir/installed-efi-grub.cfg"
+          
+          mknod -m 600 "$installer_root/dev/console" c 5 1 2>/dev/null || true
+          mknod -m 666 "$installer_root/dev/null" c 1 3 2>/dev/null || true
+          
+          cat > "$installer_root/init" <<'INSTALLINIT'
+          #!/bin/sh
+          export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+          
+          mount -t proc proc /proc 2>/dev/null || true
+          mount -t sysfs sysfs /sys 2>/dev/null || true
+          mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+          mkdir -p /tmp /run /media /targetroot /targetboot /dev/md
+          mount -t tmpfs tmpfs /run 2>/dev/null || true
+          mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+          
+          setup_ui_console() {
+            [ -c /dev/ttyS0 ] && stty -F /dev/ttyS0 115200 2>/dev/null || true
+          
+            outputs=""
+            if [ -c /dev/tty1 ]; then
+              outputs="$outputs /dev/tty1"
+            elif [ -c /dev/tty0 ]; then
+              outputs="$outputs /dev/tty0"
+            fi
+            [ -c /dev/ttyS0 ] && outputs="$outputs /dev/ttyS0"
+          
+            if [ -n "$outputs" ]; then
+              rm -f /tmp/console-tee
+              mkfifo /tmp/console-tee 2>/dev/null || true
+              if [ -p /tmp/console-tee ]; then
+                tee $outputs < /tmp/console-tee >/dev/null &
+                exec > /tmp/console-tee 2>&1
+              fi
+            fi
+          
+            rm -f /tmp/console-input
+            mkfifo /tmp/console-input 2>/dev/null || true
+            if [ -p /tmp/console-input ]; then
+              exec 3<>/tmp/console-input
+              forward_input() {
+                dev="$1"
+                [ -c "$dev" ] || return
+                [ "$dev" = "/dev/ttyS0" ] && stty -F "$dev" 115200 2>/dev/null || true
+                while IFS= read -r line < "$dev"; do
+                  printf '%s\n' "$line" >&3
+                done
+              }
+              if [ -c /dev/tty1 ]; then
+                forward_input /dev/tty1 &
+              else
+                forward_input /dev/tty0 &
+              fi
+              forward_input /dev/ttyS0 &
+              exec < /tmp/console-input
+            else
+              exec < /dev/console
+            fi
+          }
+          
+          setup_ui_console
+          
+          for module in \
+            isofs udf sr_mod cdrom loop \
+            ahci libahci ata_piix sd_mod sg scsi_mod usb_storage uas \
+            mpt3sas megaraid_sas hpsa smartpqi aacraid mpi3mr pm80xx 3w-sas 3w-9xxx 3w-xxxx arcmsr \
+            hid hid_generic usbhid usbkbd atkbd i8042 libps2 serio serio_raw evdev \
+            nvme nvme_core \
+            virtio virtio_pci virtio_blk virtio_scsi \
+            xhci_pci ehci_pci ohci_pci uhci_hcd \
+            mpt3sas megaraid_sas hpsa \
+            vfat nls_cp437 nls_iso8859-1 ext4 mbcache jbd2 \
+            md-mod raid1 libcrc32c; do
+            modprobe "$module" 2>/dev/null || true
+          done
+          mdev -s 2>/dev/null || true
+          sleep 2
+          
+          disable_vga_tab_key() {
+            [ -x /usr/bin/loadkeys ] || return 0
+            console=""
+            [ -c /dev/tty1 ] && console=/dev/tty1
+            [ -z "$console" ] && [ -c /dev/tty0 ] && console=/dev/tty0
+            [ -n "$console" ] || return 0
+            loadkeys -q -C "$console" /etc/no-tab.kmap 2>/tmp/loadkeys.log || {
+              echo "warning: failed to load no-tab keymap on $console"
+              cat /tmp/loadkeys.log 2>/dev/null || true
+            }
+          }
+          disable_vga_tab_key
+          
+          trim() {
+            echo "$*" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+          
+          clean_input() {
+            printf '%s' "$*" | tr '\r\t' '  ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+          
+          read_first() {
+            for file in "$@"; do
+              [ -r "$file" ] || continue
+              value="$(cat "$file" 2>/dev/null | head -n 1)"
+              value="$(trim "$value")"
+              [ -n "$value" ] && { echo "$value"; return; }
+            done
+          }
+          
+          parent_disk() {
+            dev="$1"
+            dev="${dev#/dev/}"
+            dev="${dev##*/}"
+            case "$dev" in
+              nvme*n*p[0-9]*) echo "$dev" | sed 's/p[0-9][0-9]*$//' ;;
+              mmcblk*p[0-9]*) echo "$dev" | sed 's/p[0-9][0-9]*$//' ;;
+              sd*[0-9]*|vd*[0-9]*|xvd*[0-9]*) echo "$dev" | sed 's/[0-9][0-9]*$//' ;;
+              *) echo "$dev" ;;
+            esac
+          }
+          
+          part_dev() {
+            disk="$1"
+            part="$2"
+            case "$disk" in
+              nvme*|mmcblk*) echo "/dev/${disk}p${part}" ;;
+              *) echo "/dev/${disk}${part}" ;;
+            esac
+          }
+          
+          try_payload_device() {
+            candidate="$1"
+            shift
+            [ -b "$candidate" ] || return 1
+          
+            umount /media 2>/dev/null || true
+            for fs in "$@"; do
+              opts="ro"
+              [ "$fs" = "ext4" ] && opts="ro,noload"
+              if mount -o "$opts" -t "$fs" "$candidate" /media 2>/dev/null; then
+                if [ -f /media/payload/openwrt.img.gz ]; then
+                  MEDIA_DEV="$candidate"
+                  MEDIA_PARENT="$(parent_disk "$candidate")"
+                  PAYLOAD_PATH="/media/payload/openwrt.img.gz"
+                  PAYLOAD_NAME="$(cat /media/payload/name 2>/dev/null || echo openwrt.img.gz)"
+                  PAYLOAD_SHA256="$(cat /media/payload/sha256 2>/dev/null || true)"
+                  ROOT_START_SECTOR="$(cat /media/payload/root-start-sector 2>/dev/null || echo 524800)"
+                  RAID_INITRAMFS="/media/payload/raid-initramfs.gz"
+                  EFI_BOOTX64="/media/payload/bootx64.efi"
+                  export MEDIA_DEV MEDIA_PARENT PAYLOAD_PATH PAYLOAD_NAME PAYLOAD_SHA256 ROOT_START_SECTOR RAID_INITRAMFS EFI_BOOTX64
+                  return 0
+                fi
+                umount /media 2>/dev/null || true
+              fi
+            done
+            return 1
+          }
+          
+          is_removable_candidate() {
+            dev="$(readlink -f "$1" 2>/dev/null || echo "$1")"
+            dev="${dev#/dev/}"
+            parent="$(parent_disk "$dev")"
+            [ -r "/sys/block/$parent/removable" ] || return 1
+            [ "$(cat "/sys/block/$parent/removable" 2>/dev/null)" = "1" ]
+          }
+          
+          find_payload() {
+            echo "Waiting for installer virtual CD/DVD media..."
+            i=0
+            while [ "$i" -lt 45 ]; do
+              mdev -s 2>/dev/null || true
+              for candidate in /dev/sr* /dev/cdrom; do
+                try_payload_device "$candidate" iso9660 udf && return 0
+              done
+              i=$((i + 1))
+              sleep 1
+            done
+          
+            echo "Virtual CD/DVD payload not found; checking removable USB media only..."
+            for candidate in /dev/sd[a-z] /dev/sd[a-z][0-9]* /dev/xvd[a-z] /dev/xvd[a-z][0-9]* /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
+              [ -b "$candidate" ] || continue
+              is_removable_candidate "$candidate" || continue
+              try_payload_device "$candidate" iso9660 udf vfat ext4 && return 0
+            done
+          
+            return 1
+          }
+          
+          if ! find_payload; then
+            echo "Cannot find installer payload on CD/virtual media."
+            exec sh
+          fi
+          
+          size_gb() {
+            sectors="$1"
+            echo $((sectors * 512 / 1000 / 1000 / 1000))
+          }
+          
+          show_hardware() {
+            cpu="$(awk -F': ' '/model name|Hardware|Processor/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+            [ -n "$cpu" ] || cpu="Unknown CPU"
+            cores="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 0)"
+            [ "$cores" -gt 0 ] 2>/dev/null || cores=1
+            mem_kb="$(awk '/MemTotal/ {print $2; exit}' /proc/meminfo 2>/dev/null)"
+            mem_gb=$(((mem_kb + 1048575) / 1048576))
+            vendor="$(read_first /sys/class/dmi/id/sys_vendor)"
+            product="$(read_first /sys/class/dmi/id/product_name)"
+            bios="$(read_first /sys/class/dmi/id/bios_version)"
+          
+            echo "System : ${vendor:-Unknown} ${product:-Unknown}"
+            echo "BIOS   : ${bios:-Unknown}"
+            echo "CPU    : $cpu ($cores cores)"
+            echo "Memory : ${mem_gb} GB"
+            echo
+            echo "Network:"
+            found_net=0
+            for iface_path in /sys/class/net/*; do
+              [ -e "$iface_path" ] || continue
+              iface="${iface_path##*/}"
+              [ "$iface" = "lo" ] && continue
+              mac="$(cat "$iface_path/address" 2>/dev/null)"
+              driver="$(basename "$(readlink "$iface_path/device/driver" 2>/dev/null)" 2>/dev/null)"
+              echo "  $iface  ${mac:-unknown}  ${driver:-unknown}"
+              found_net=1
+            done
+            [ "$found_net" -eq 1 ] || echo "  No network interfaces detected"
+          }
+          
+          build_disk_list() {
+            : > /tmp/disks.list
+            idx=1
+            for sysdev in /sys/block/*; do
+              [ -e "$sysdev/size" ] || continue
+              dev="${sysdev##*/}"
+              case "$dev" in
+                loop*|ram*|sr*|fd*|dm-*|md*|zram*) continue ;;
+              esac
+              [ -n "$MEDIA_PARENT" ] && [ "$dev" = "$MEDIA_PARENT" ] && continue
+              sectors="$(cat "$sysdev/size" 2>/dev/null || echo 0)"
+              [ "$sectors" -gt 0 ] 2>/dev/null || continue
+              gb="$(size_gb "$sectors")"
+              vendor="$(read_first "$sysdev/device/vendor")"
+              model="$(read_first "$sysdev/device/model" "$sysdev/device/name")"
+              serial="$(read_first "$sysdev/device/serial" "$sysdev/device/wwid")"
+              removable="$(cat "$sysdev/removable" 2>/dev/null || echo 0)"
+              rotational="$(cat "$sysdev/queue/rotational" 2>/dev/null || echo '?')"
+              media="SSD/NVMe"
+              [ "$rotational" = "1" ] && media="HDD"
+              [ "$removable" = "1" ] && media="$media removable"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$dev" "$gb" "${vendor:-Unknown}" "${model:-Unknown}" "${serial:-Unknown}" "$media" >> /tmp/disks.list
+              idx=$((idx + 1))
+            done
+          }
+          
+          show_disks() {
+            build_disk_list
+            echo "Target disks:"
+            if [ ! -s /tmp/disks.list ]; then
+              echo "  No writable disks detected."
+              return
+            fi
+            while IFS='	' read -r idx dev gb vendor model serial media; do
+              printf '  %s) /dev/%s  %s GB  %s  %s %s  SN:%s\n' "$idx" "$dev" "$gb" "$media" "$vendor" "$model" "$serial"
+            done < /tmp/disks.list
+          }
+          
+          disk_by_index() {
+            choice="$1"
+            while IFS='	' read -r idx dev gb vendor model serial media; do
+              [ "$idx" = "$choice" ] && { echo "$dev"; return; }
+            done < /tmp/disks.list
+          }
+          
+          selected_disks() {
+            choices="$(clean_input "$1" | tr ',;' '  ')"
+            selected=""
+            for choice in $choices; do
+              dev="$(disk_by_index "$choice")"
+              [ -n "$dev" ] || return 1
+              case " $selected " in
+                *" $dev "*) ;;
+                *) selected="$selected $dev" ;;
+              esac
+            done
+            echo "$(trim "$selected")"
+          }
+          
+          word_count() {
+            n=0
+            for item in "$@"; do
+              [ -n "$item" ] && n=$((n + 1))
+            done
+            echo "$n"
+          }
+          
+          confirm_install() {
+            echo
+            echo "WARNING: selected disks will be overwritten."
+            printf 'Type ERASE to confirm disk wipe: '
+            read -r confirm_erase
+            confirm_erase="$(clean_input "$confirm_erase")"
+            [ "$confirm_erase" = "ERASE" ] || return 1
+            printf 'Type INSTALL to start: '
+            read -r confirm_install_word
+            confirm_install_word="$(clean_input "$confirm_install_word")"
+            [ "$confirm_install_word" = "INSTALL" ] || return 1
+            return 0
+          }
+          
+          verify_payload() {
+            echo "Verifying embedded image..."
+            if [ -n "$PAYLOAD_SHA256" ]; then
+              actual="$(sha256sum "$PAYLOAD_PATH" | awk '{print $1}')"
+              if [ "$actual" != "$PAYLOAD_SHA256" ]; then
+                echo "SHA256 verification failed."
+                echo "expected: $PAYLOAD_SHA256"
+                echo "actual  : $actual"
+                return 1
+              fi
+            fi
+            return 0
+          }
+          
+          write_raid_boot_files() {
+            bootpart="$1"
+            echo "Installing RAID boot files to $bootpart ..."
+            mount -o rw "$bootpart" /targetboot || return 1
+            mkdir -p /targetboot/boot/grub
+            cp "$RAID_INITRAMFS" /targetboot/boot/raid-initramfs.gz
+            if [ -f "$EFI_BOOTX64" ]; then
+              mkdir -p /targetboot/efi/boot
+              cp "$EFI_BOOTX64" /targetboot/efi/boot/bootx64.efi
+            fi
+            cat > /targetboot/boot/grub/grub.cfg <<'GRUBCFG'
+          serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1 --rtscts=off
+          terminal_input console serial; terminal_output console serial
+          
+          set default="0"
+          set timeout="3"
+          
+          set root=(hd0,gpt1)
+          if [ ! -e /boot/vmlinuz ]; then
+          	set root=(hd1,gpt1)
+          fi
+          if [ ! -e /boot/vmlinuz ]; then
+          	set root=(hd2,gpt1)
+          fi
+          if [ ! -e /boot/vmlinuz ]; then
+          	set root=(hd3,gpt1)
+          fi
+          if [ x$boot_source = x ]; then
+          	set boot_source=default-grub-prefix
+          fi
+          
+          echo "GRUB boot source: $boot_source"
+          
+          menuentry "ImmortalWrt RAID1" {
+          	linux /boot/vmlinuz root=/dev/md/openwrt-root rootwait console=ttyS0,115200n8 console=tty1 grub_source=$boot_source
+          	initrd /boot/raid-initramfs.gz
+          }
+          menuentry "ImmortalWrt RAID1 (failsafe)" {
+          	linux /boot/vmlinuz failsafe=true root=/dev/md/openwrt-root rootwait console=ttyS0,115200n8 console=tty1 grub_source=$boot_source
+          	initrd /boot/raid-initramfs.gz
+          }
+          GRUBCFG
+            sync
+            umount /targetboot
+          }
+          
+          write_base_image() {
+            disk="$1"
+            echo
+            echo "Writing base image to /dev/$disk ..."
+            mdadm --stop --scan 2>/dev/null || true
+            wipefs -a "/dev/$disk" 2>/dev/null || true
+            gunzip -c "$PAYLOAD_PATH" | dd of="/dev/$disk" bs=4M
+            sync
+            partprobe "/dev/$disk" 2>/dev/null || true
+            mdev -s 2>/dev/null || true
+            sleep 1
+          }
+          
+          install_single() {
+            target="$1"
+            clear
+            echo "Single disk install target:"
+            grep "^[0-9][0-9]*	$target	" /tmp/disks.list | while IFS='	' read -r idx dev gb vendor model serial media; do
+              echo "  /dev/$dev  $gb GB  $media  $vendor $model  SN:$serial"
+            done
+            echo
+            echo "Image : $PAYLOAD_NAME"
+            echo "SHA256: ${PAYLOAD_SHA256:-unknown}"
+            confirm_install || { echo "Cancelled."; sleep 2; return; }
+            verify_payload || { printf 'Press Enter to return.'; read _; return; }
+            write_base_image "$target"
+            echo
+            echo "Single disk install completed."
+            echo "Unmount/eject the IPMI ISO, then reboot from disk."
+            read _
+          }
+          
+          install_raid1() {
+            targets="$1"
+            set -- $targets
+            count="$(word_count "$@")"
+            if [ "$count" -lt 2 ]; then
+              echo "True mdadm RAID1 requires at least two disks."
+              sleep 2
+              return
+            fi
+          
+            clear
+            echo "True mdadm RAID1 install targets:"
+            for target in "$@"; do
+              grep "^[0-9][0-9]*	$target	" /tmp/disks.list | while IFS='	' read -r idx dev gb vendor model serial media; do
+                echo "  /dev/$dev  $gb GB  $media  $vendor $model  SN:$serial"
+              done
+            done
+            echo
+            echo "Image : $PAYLOAD_NAME"
+            echo "SHA256: ${PAYLOAD_SHA256:-unknown}"
+            echo
+            echo "This creates /dev/md/openwrt-root as RAID1 metadata=1.0."
+            echo "The boot partition is duplicated on every selected disk."
+            confirm_install || { echo "Cancelled."; sleep 2; return; }
+            verify_payload || { printf 'Press Enter to return.'; read _; return; }
+          
+            for target in "$@"; do
+              write_base_image "$target"
+            done
+          
+            parts=""
+            for target in "$@"; do
+              disk="/dev/$target"
+              echo
+              echo "Preparing RAID member on $disk ..."
+              sgdisk -e "$disk" >/dev/null 2>&1 || true
+              sgdisk -d 2 "$disk" >/dev/null
+              sgdisk -n "2:${ROOT_START_SECTOR}:0" -t 2:fd00 -c 2:"OpenWrt RAID1 root" "$disk" >/dev/null
+              sgdisk -u "2:R" "$disk" >/dev/null
+              partprobe "$disk" 2>/dev/null || true
+              mdev -s 2>/dev/null || true
+              sleep 1
+              part="$(part_dev "$target" 2)"
+              [ -b "$part" ] || { echo "Missing partition device: $part"; return; }
+              mdadm --zero-superblock --force "$part" 2>/dev/null || true
+              parts="$parts $part"
+            done
+          
+            mdadm --stop /dev/md/openwrt-root 2>/dev/null || true
+            mdadm --stop /dev/md0 2>/dev/null || true
+            mkdir -p /dev/md
+            echo
+            echo "Creating RAID1 array..."
+            mdadm --create /dev/md/openwrt-root --metadata=1.0 --level=1 --raid-devices="$count" $parts --run --force --assume-clean
+            sleep 2
+            mdev -s 2>/dev/null || true
+          
+            echo "Checking and expanding root filesystem on RAID..."
+            e2fsck -fy /dev/md/openwrt-root || true
+            resize2fs /dev/md/openwrt-root || true
+          
+            mount -o rw /dev/md/openwrt-root /targetroot
+            uuid="$(mdadm --detail --scan /dev/md/openwrt-root | sed -n 's/.*UUID=\([^ ]*\).*/\1/p' | head -n 1)"
+            mkdir -p /targetroot/etc/config
+            cat > /targetroot/etc/config/mdadm <<EOF
+          config mdadm
+          	list devices /dev/sd*
+          	list devices /dev/vd*
+          	list devices /dev/xvd*
+          	list devices /dev/nvme*
+          	list devices /dev/mmcblk*
+          	list devices partitions
+          
+          config array
+          	option uuid ${uuid}
+          	option device /dev/md/openwrt-root
+          EOF
+            sync
+            umount /targetroot
+          
+            for target in "$@"; do
+              bootpart="$(part_dev "$target" 1)"
+              write_raid_boot_files "$bootpart" || return 1
+            done
+          
+            echo
+            cat /proc/mdstat
+            echo
+            echo "True mdadm RAID1 install completed."
+            echo "Unmount/eject the IPMI ISO, then reboot from disk."
+            echo "Enter r to reboot now, s for shell, or anything else to return to menu."
+            read -r next
+            next="$(clean_input "$next")"
+            case "$next" in
+              r|R) reboot -f ;;
+              s|S) sh ;;
+            esac
+          }
+          
+          repair_raid_boot() {
+            clear
+            echo "Repair RAID1 boot files"
+            echo
+            show_disks
+            echo
+            printf 'Disk numbers to repair, for example 1,2: '
+            read -r choice
+            choice="$(clean_input "$choice")"
+            targets="$(selected_disks "$choice")" || { echo "Invalid selection."; sleep 2; return; }
+            [ -n "$targets" ] || { echo "Invalid selection."; sleep 2; return; }
+          
+            for target in $targets; do
+              bootpart="$(part_dev "$target" 1)"
+              [ -b "$bootpart" ] || { echo "Missing boot partition: $bootpart"; return; }
+              write_raid_boot_files "$bootpart" || return 1
+            done
+          
+            echo
+            echo "Boot repair completed."
+            echo "Unmount/eject the IPMI ISO, then reboot from disk."
+            printf 'Press Enter to return.'
+            read -r _
+          }
+          
+          main_menu() {
+            while true; do
+              clear
+              echo "============================================================"
+              echo "          ImmortalWrt x86 mdadm RAID1 Installer"
+              echo "============================================================"
+              echo "Installer media: ${MEDIA_DEV:-unknown}"
+              echo "Image          : $PAYLOAD_NAME"
+              echo "SHA256         : ${PAYLOAD_SHA256:-unknown}"
+              echo
+              show_hardware
+              echo
+              show_disks
+              echo
+              echo "Install modes:"
+              echo "  one disk number       normal single-disk image install"
+              echo "  multiple numbers 1,2 or 1 2  true mdadm RAID1 root install"
+              echo
+              echo "Commands: b repair boot, r refresh, s shell, q reboot."
+              printf 'Select> '
+              read -r choice
+              choice="$(clean_input "$choice")"
+              case "$choice" in
+                b|B) repair_raid_boot; continue ;;
+                r|R) continue ;;
+                s|S) sh ;;
+                q|Q) reboot -f ;;
+              esac
+              targets="$(selected_disks "$choice")" || { echo "Invalid selection."; sleep 1; continue; }
+              [ -n "$targets" ] || { echo "Invalid selection."; sleep 1; continue; }
+              set -- $targets
+              count="$(word_count "$@")"
+              if [ "$count" -eq 1 ]; then
+                install_single "$1"
+              else
+                install_raid1 "$targets"
+              fi
+            done
+          }
+          
+          main_menu
+          INSTALLINIT
+          chmod +x "$installer_root/init"
+          
+          (cd "$installer_root" && find . -print0 | cpio --null -o --format=newc | gzip -9) > "$iso_root/boot/initramfs.gz"
+          
+          cat > "$iso_root/boot/grub/grub.cfg" <<'GRUB'
+          set default=0
+          set timeout=5
+          serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1
+          terminal_input console serial
+          terminal_output console serial
+          
+          menuentry "ImmortalWrt x86 mdadm RAID1 installer" {
+              linux /boot/vmlinuz nomodeset console=ttyS0,115200n8 console=tty1
+              initrd /boot/initramfs.gz
+          }
+          GRUB
+          
+          echo "Building $iso_path"
+          grub-mkrescue -o "$iso_path" "$iso_root"
+          sha256sum "$iso_path" > "$iso_path.sha256"
+          ls -lh "$iso_path" "$iso_path.sha256"
+          MDRAID_INSTALLER_SCRIPT
+          chmod +x "$installer_script"
+          sudo "$installer_script" "$FIRMWARE_DIR/$payload" "$ISO_OUTPUT_DIR"
+          sudo chown -R "$(id -u):$(id -g)" "$ISO_OUTPUT_DIR"
+          echo "ISO_DIR=$ISO_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          ls -lh "$ISO_OUTPUT_DIR/$iso_name" "$ISO_OUTPUT_DIR/$iso_name.sha256"
+
+      - name: Upload X86 Installer ISO To Release
+        if: env.UPLOAD_RELEASE == 'true'
+        uses: softprops/action-gh-release@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag_name: ${{ needs.job_init.outputs.output_release_tag }}
+          files: |
+            ${{ steps.build_x86_installer_iso.outputs.ISO_DIR }}/*-mdadm-raid1-installer.iso
+            ${{ steps.build_x86_installer_iso.outputs.ISO_DIR }}/*-mdadm-raid1-installer.iso.sha256
+
+      - name: Upload X86 Installer ISO To Artifact
+        if: env.UPLOAD_ARTIFACT == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: immortalwrt_X86_installer_iso
+          path: |
+            ${{ steps.build_x86_installer_iso.outputs.ISO_DIR }}/*-mdadm-raid1-installer.iso
+            ${{ steps.build_x86_installer_iso.outputs.ISO_DIR }}/*-mdadm-raid1-installer.iso.sha256
+          overwrite: true
+          retention-days: 5
   job_organize_tags:
-    needs: [job_init, job_source_init, job_generate_release_tag, job_compile_and_upload]
+    needs: [job_init, job_source_init, job_generate_release_tag, job_compile_and_upload, job_build_x86_installer_iso]
     if: ${{ !cancelled() && needs.job_source_init.result == 'success' && needs.job_generate_release_tag.result == 'success' }}
     runs-on: ubuntu-latest
     name: Organize-Release-Tags
@@ -735,7 +1839,7 @@ jobs:
           fetch-depth: 0
 
       - name: Pull the latest changes
-        run: git pull origin ${{ github.ref_name }}
+        run: git fetch origin ${{ github.ref_name }} && git reset --hard origin/${{ github.ref_name }}
 
       - name: Download Tags
         uses: actions/download-artifact@v8
@@ -764,42 +1868,3 @@ jobs:
           tag_name: ${{ needs.job_init.outputs.output_release_tag }}
           body_path: release.txt
 
-  rerun-failed-jobs:
-    runs-on: ubuntu-latest
-    needs: [job_init, job_source_init, job_generate_release_tag, job_compile_and_upload, job_organize_tags]
-    if: failure() && fromJSON(github.run_attempt) < 3  && !cancelled()
-    steps:
-      - name: Rerun failed jobs in the current workflow
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "Retry failed jobs for the ${{ fromJSON(github.run_attempt) }} time, Retry 3 times in total"
-          gh workflow run Retry_Failure_Jobs.yml -F run_id=${{ github.run_id }}
-
-  final-execution-jobs:
-    runs-on: ubuntu-latest
-    needs: [rerun-failed-jobs, job_organize_tags]
-    if: ${{ always() && !cancelled() }}
-    steps:
-      - name: Trigger Release Update
-        if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-        uses: peter-evans/repository-dispatch@v4
-        with:
-          token: ${{ secrets.MY_SECRET_PAT }}
-          repository: smallprogram/MyAction
-          event-type: openwrt_compilation_completed
-
-      # - name: Stateful Lifecycle Check
-      #   id: lifecycle_check
-      #   run: |
-      #     chmod +x compile_script/check_lifecycle.sh
-      #     $GITHUB_WORKSPACE/compile_script/check_lifecycle.sh
-
-      # - name: Trigger Cache Update
-      #   if: ${{ needs.rerun-failed-jobs.result == 'skipped' }}
-      #   uses: peter-evans/repository-dispatch@v4
-      #   with:
-      #     token: ${{ github.token }}
-      #     event-type: openwrt_cache_update_v6
-      #     client-payload: '{"force_rebuild": "${{ steps.lifecycle_check.outputs.force_rebuild }}"}'
