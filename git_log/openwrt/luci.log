@@ -1,9 +1,0 @@
-<details> <summary> <b>luci new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/openwrt/luci/compare/2df00deb122093cbf429266ffef7ad06aaecb48f...93e4a9bfaf40f735d16eb6a331c8a78b29f4e520)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-93e4a9bfaf|Hannu Nyman|Thu Jun 25 23:42:26 2026 +0300|treewide: backport translations
-</details>
