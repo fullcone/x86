@@ -40,8 +40,6 @@ clone_custom_packages () {
 
     git clone https://github.com/sirpdboy/netspeedtest.git ${path}netspeedtest
 
-    git clone https://github.com/pymumu/openwrt-smartdns.git ${path}openwrt-smartdns
-    git clone https://github.com/pymumu/luci-app-smartdns.git ${path}luci-app-smartdns
 
     git clone https://github.com/timsaya/openwrt-bandix.git ${path}openwrt-bandix
     git clone https://github.com/timsaya/luci-app-bandix.git ${path}luci-app-bandix
