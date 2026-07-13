@@ -1,49 +1,112 @@
-#!/bin/bash
-source $GITHUB_WORKSPACE/compile_script/main_and_feeds_url.sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 定义一个字符串变量用于累加 hash 值
-HASH_STRING=""
+source "$GITHUB_WORKSPACE/compile_script/main_and_feeds_url.sh"
 
-echo "------------------------------------------------------------------------"
-echo "-------------------------Begin Update Checker---------------------------"
-echo "------------------------------------------------------------------------"
+mapfile -t unique_repositories < <(printf '%s\n' "${all_REPO_URLS[@]}" | awk 'NF' | sort -u)
+if [ "${#unique_repositories[@]}" -eq 0 ]; then
+  echo "::error::No source repositories were discovered."
+  exit 1
+fi
 
-for url in "${all_REPO_URLS[@]}"; do
-    # 分离 URL 和分支
-    REPO_URL=$(echo "$url" | awk '{print $1}')
-    BRANCH=$(echo "$url" | awk '{print $2}')
-    
-    echo "Checking $REPO_URL (Branch/Tag: ${BRANCH:-HEAD})..."
-    
-    # 👑 核心优化：使用 git ls-remote 直接探查远端，绝不 clone 代码！耗时从几分钟缩短到几秒！
-    if [ -n "$BRANCH" ]; then
-        # 查找指定分支的远端 Hash，截取前 7 位
-        CURRENT_HASH=$(git ls-remote "$REPO_URL" "$BRANCH" | head -n 1 | awk '{print substr($1,1,7)}')
+resolve_remote_commit() {
+  local repository="$1"
+  local ref="$2"
+  local auth_header="${3:-}"
+  local max_attempts=3
+  local attempt=1
+  local delay_seconds
+  local output
+  local status
+  local reason
+  local commit
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if [ -n "$auth_header" ]; then
+      if output="$(
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth_header" \
+        timeout 30s git ls-remote "$repository" "$ref" 2>&1
+      )"; then
+        status=0
+      else
+        status=$?
+      fi
+    elif output="$(GIT_TERMINAL_PROMPT=0 timeout 30s git ls-remote "$repository" "$ref" 2>&1)"; then
+      status=0
     else
-        # 查找默认 HEAD 的远端 Hash，截取前 7 位
-        CURRENT_HASH=$(git ls-remote "$REPO_URL" HEAD | head -n 1 | awk '{print substr($1,1,7)}')
+      status=$?
     fi
-    
-    # 防呆校验：如果获取失败，给出明确提示
-    if [ -z "$CURRENT_HASH" ]; then
-        echo "  ⚠️ Warning: Failed to fetch hash for $REPO_URL"
+
+    commit="$(awk 'NR == 1 {print $1}' <<< "$output")"
+    if [[ "$commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      printf '%s\n' "${commit,,}"
+      return 0
+    fi
+
+    if [ "$status" -eq 0 ]; then
+      reason="no matching 40-character commit"
     else
-        echo "  ✅ Latest Hash: $CURRENT_HASH"
-        HASH_STRING="${HASH_STRING}${CURRENT_HASH}"
+      reason="git exit $status"
     fi
+    echo "::warning::Unable to resolve $repository at $ref (attempt $attempt/$max_attempts: $reason)" >&2
+    if [ -n "$output" ]; then
+      printf '%s\n' "$output" | tail -n 3 | sed 's/^/  /' >&2
+    fi
+
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      delay_seconds=$((attempt * 2))
+      sleep "$delay_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+failures=0
+records=()
+for entry in "${unique_repositories[@]}"; do
+  read -r repository branch <<< "$entry"
+  ref="${branch:-HEAD}"
+  echo "Checking $repository ($ref)"
+  if commit="$(resolve_remote_commit "$repository" "$ref")"; then
+    records+=("${repository}@${ref}=${commit}")
+  else
+    echo "::error::Unable to resolve $repository at $ref after 3 attempts."
+    failures=$((failures + 1))
+  fi
 done
 
-# 输出最终的 hash 字符串
-echo "------------------------------------------------------------------------"
-echo "Raw combined hashes (Length: ${#HASH_STRING}): $HASH_STRING"
+if [ -z "${FC_TOKEN:-}" ]; then
+  echo "::error::X86OPENWRT is required to inspect the private FullConeFlow source."
+  failures=$((failures + 1))
+else
+  echo "::add-mask::$FC_TOKEN"
+  fullcone_auth="$(printf 'x-access-token:%s' "$FC_TOKEN" | base64 | tr -d '\r\n')"
+  echo "::add-mask::$fullcone_auth"
+  if fullcone_commit="$(resolve_remote_commit \
+    "https://github.com/fullcone/fullcone-flow.git" \
+    HEAD \
+    "$fullcone_auth")"; then
+    records+=("https://github.com/fullcone/fullcone-flow.git@HEAD=${fullcone_commit}")
+  else
+    echo "::error::Unable to resolve the private fullcone/fullcone-flow source after 3 attempts."
+    failures=$((failures + 1))
+  fi
+  unset fullcone_auth
+fi
 
-# 👑 核心优化：对无限变长的字符串进行 SHA-256 降维打击，生成绝对唯一的固定 64 位 Hash
-FINAL_HASH=$(echo -n "$HASH_STRING" | sha256sum | awk '{print $1}')
+if [ "$failures" -ne 0 ]; then
+  echo "::error::$failures source repository checks failed; refusing to publish a partial state."
+  exit 1
+fi
 
-echo "Final fixed-length hash: $FINAL_HASH"
-# 将这个终极定长 Hash 传递给下个步骤
-echo "FINAL_HASH=$FINAL_HASH" >> $GITHUB_OUTPUT
-echo "HASH_STRING=$HASH_STRING" >> $GITHUB_OUTPUT
-echo "------------------------------------------------------------------------"
-echo "-------------------------End Update Checker---------------------------"
-echo "------------------------------------------------------------------------"
+HASH_STRING="$(printf '%s\n' "${records[@]}" | sort | tr '\n' '|')"
+FINAL_HASH="$(printf '%s' "$HASH_STRING" | sha256sum | awk '{print $1}')"
+echo "Resolved ${#records[@]} repositories"
+echo "Final source state: $FINAL_HASH"
+echo "FINAL_HASH=$FINAL_HASH" >> "$GITHUB_OUTPUT"
+echo "HASH_STRING=$HASH_STRING" >> "$GITHUB_OUTPUT"
