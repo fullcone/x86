@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source_code_platforms=(openwrt immortalwrt lede)
+source_code_platforms=(immortalwrt)
 
 openwrt_value='{
   "REPO_URL": "https://github.com/openwrt/openwrt.git",
@@ -34,7 +34,7 @@ lede_value='{
 }'
 
 openwrt_platforms=(X86 R2S R3S R4S R4SE R5C R5S R6C R6S)
-immortalwrt_platforms=(X86 R2S R3S R4S R4SE R5C R5S R6C R6S R66S R68S)
+immortalwrt_platforms=(X86 X86_AllImages X86_VMware AX3600 AX3600_stock R2S R3S R4S R4SE R5C R5S R6C R6S R66S R68S)
 lede_platforms=(X86 R2S R3S R4S R4SE R5C R5S R6C R6S H28K H29K H66K H68K H69K R66S R68S)
 
 matrix_json="["

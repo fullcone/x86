@@ -1,102 +1,94 @@
-#
-# Copyright (c) 2019-2026 smallprogram
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/smallprogram/OpenWrtAction
-# File: .github/workflows/Update_Checker.yml
-# Description: Source code update checker
-#
-
+# Source update checker generated and maintained by sync_upstream.yml
 name: Update_Checker
 
 on:
+  repository_dispatch:
+    types: [openwrt_update_check_v1]
   workflow_dispatch:
     inputs:
-      ssh:
-        description: 'SSH connection to Actions'
+      force_rebuild:
+        description: 'Trigger a clean build even when source hashes are unchanged'
         required: false
-        default: 'false'
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 16 */5 * *'
-    # 每五天的UTC 16:00触发 北京时间为每五天的凌晨0点
+    - cron: '30 2 * * *'
 
 permissions:
   contents: write
-  packages: write
-  actions: write
+  actions: read
+
+concurrency:
+  group: update-checker-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      - name: Resolve source state
+        id: source_hash
+        env:
+          FC_TOKEN: ${{ secrets.X86OPENWRT }}
+        run: |
+          set -euo pipefail
+          chmod +x compile_script/update_checker.sh
+          "$GITHUB_WORKSPACE/compile_script/update_checker.sh"
 
-    - name: Checkout
-      uses: actions/checkout@v7
-      with:
-          ref: ${{ github.head_ref || github.ref_name }}
-      
+      - name: Restore source state
+        id: source_state
+        uses: actions/cache@v5
+        with:
+          path: .source-state
+          key: source-state-${{ steps.source_hash.outputs.FINAL_HASH }}
 
-    - name: Get Commit Hash
-      id: getHash
-      run: |
-        chmod +x compile_script/update_checker.sh
-        $GITHUB_WORKSPACE/compile_script/update_checker.sh
+      - name: Save source state
+        if: steps.source_state.outputs.cache-hit != 'true'
+        env:
+          HASH_STRING: ${{ steps.source_hash.outputs.HASH_STRING }}
+        run: printf '%s\n' "$HASH_STRING" > .source-state
 
-    - name: Compare Commit Hash
-      id: cacheHash
-      uses: actions/cache@v5
-      with:
-        path: .commitHash_All
-        key: HEAD-${{ steps.getHash.outputs.FINAL_HASH }}  # cache的key值，会在job结束后缓存
+      - name: Trigger firmware build
+        if: steps.source_state.outputs.cache-hit != 'true' || inputs.force_rebuild || github.event.client_payload.force_rebuild == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || github.event.client_payload.force_rebuild || false }}
+          CURRENT_SHA: ${{ github.sha }}
+          BUILD_WORKFLOW_PATH: .github/workflows/Build_Multi_Platform(V6).yml
+        run: |
+          set -euo pipefail
 
-    - name: Save New Commit Hash
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      run: |
-        echo ${{ steps.getHash.outputs.HASH_STRING }} | tee .commitHash_All  
-        
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 90
+          if [ "$FORCE_REBUILD" != "true" ]; then
+            workflows_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100")"
+            build_workflow_id="$(
+              jq -r --arg path "$BUILD_WORKFLOW_PATH" \
+                '.workflows[] | select(.path == $path) | .id' \
+                <<< "$workflows_json" | sed -n '1p'
+            )"
+            if [ -z "$build_workflow_id" ]; then
+              echo "::error::Unable to locate $BUILD_WORKFLOW_PATH for duplicate-build detection."
+              exit 1
+            fi
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      with:
-        keep_latest: 10
-        keep_min_download_counts: 2
-        delete_expired_data: 160
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
+            active_build="$(
+              gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$build_workflow_id/runs?head_sha=$CURRENT_SHA&per_page=20" \
+                --jq '[.workflow_runs[] | select(.status != "completed")][0]
+                  | if . == null then empty else [.id, .status, .html_url] | @tsv end'
+            )"
+            if [ -n "$active_build" ]; then
+              IFS=$'\t' read -r active_run_id active_status active_url <<< "$active_build"
+              echo "::notice::Build run $active_run_id is already $active_status for $CURRENT_SHA; skipping duplicate dispatch."
+              echo "Existing build: $active_url"
+              exit 0
+            fi
+          fi
 
-    - name: ghcr.io cleanup action
-      uses: dataaxiom/ghcr-cleanup-action@v1
-      continue-on-error: true
-      with:
-        delete-untagged: true
-        packages: openwrt-base-cache*
-        expand-packages: true
-        token: ${{ secrets.MY_SECRET_PAT }}
-    
-    - name: Stateful Lifecycle Check
-      id: lifecycle_check
-      run: |
-        chmod +x compile_script/check_lifecycle.sh
-        $GITHUB_WORKSPACE/compile_script/check_lifecycle.sh
-        
-    - name: Trigger build
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@main
-      with:
-        token: ${{ github.token }}
-        event-type: openwrt_source_update_v6
-        client-payload: '{"force_rebuild": "${{ steps.lifecycle_check.outputs.force_rebuild }}"}'
+          jq -n --arg force_rebuild "$FORCE_REBUILD" \
+            '{event_type: "openwrt_source_update_v6", client_payload: {force_rebuild: $force_rebuild}}' \
+            | gh api --method POST "/repos/$GITHUB_REPOSITORY/dispatches" --input -
