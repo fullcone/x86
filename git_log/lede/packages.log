@@ -1,9 +1,0 @@
-<details> <summary> <b>packages new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/coolsnowwolf/packages/compare/8c61e55f5b3f9fa285cd7cea0667f09df3855f34...52082da251e709d662dd51f8cf538193ca5fdb33)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-52082da2|coolsnowwolf|Wed Sep 2 01:15:52 2026 +0800|openvpn: revert 2.7.6 and native DCO update
-</details>
