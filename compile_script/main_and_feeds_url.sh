@@ -148,3 +148,4 @@ for platform in "${source_code_platforms[@]}"; do
 done
 
 all_REPO_URLS+=("${feeds_REPO_URLS[@]}")
+all_REPO_URLS+=("${custompackages_REPO_URLS[@]}")
