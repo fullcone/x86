@@ -11,7 +11,10 @@
 # This script will be executed after `make defconfig` and `make download` to fix certain issues.
 #
 
-attempts=$1
+attempts="${1:-1}"
+
+# fullcone fail-fast diy-part3
+set -euo pipefail
 
 echo "DiY script part 3: is Runing"
 
