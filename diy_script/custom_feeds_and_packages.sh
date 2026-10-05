@@ -2,6 +2,7 @@
 
 # feeds扩展内容
 export repos=(
+  "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main"
   "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main"
   "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main"
   "src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main"
