@@ -26,7 +26,31 @@ for i in "${selected_platforms[@]}"; do
     echo ""
     echo "make defconfig for $i platform....."
     echo "result:"
-    make defconfig
+    # fullcone verify generated package configuration
+    defconfig_log="$GITHUB_WORKSPACE/defconfig-$i.log"
+    if ! make defconfig > "$defconfig_log" 2>&1; then
+        cat "$defconfig_log"
+        exit 1
+    fi
+    cat "$defconfig_log"
+    if grep -q 'error: recursive dependency detected' "$defconfig_log"; then
+        echo "Invalid package Kconfig for $i"
+        exit 1
+    fi
+    case "$i" in
+        X86|X86_AllImages|X86_VMware)
+            for package in nikki luci-app-nikki luci-i18n-nikki-zh-cn mihomo-meta tc-full fullcone-flow luci-app-accesspolicycontroller; do
+                grep -Fxq "CONFIG_PACKAGE_$package=y" .config || {
+                    echo "Required Nikki package dropped by defconfig: $package ($i)"
+                    exit 1
+                }
+            done
+            if grep -qE '^CONFIG_PACKAGE_(mihomo-alpha|tc-bpf|tc-tiny)=[ym]$' .config; then
+                echo "Unexpected alternative provider selected for $i"
+                exit 1
+            fi
+            ;;
+    esac
     echo ""
     cd ..
     cp -a openwrt/.config $CONFIGS/$i.config
