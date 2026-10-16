@@ -64,7 +64,7 @@ if [ -f "$CUSTOM_SCRIPT" ]; then
                 custompackages_REPO_URLS+=("$url")
             fi
         fi
-    done < <(grep -E '^[[:space:]]*git clone' "$CUSTOM_SCRIPT")
+    done < <(grep -E '^[[:space:]]*(git clone|fullcone_retry_clone)' "$CUSTOM_SCRIPT")
 fi
 
 # 打印解析结果以供日志审查
@@ -78,14 +78,26 @@ echo "=========================================="
 
 # 下方是你原本的解析逻辑，一字未改！
 # 处理仓库函数
+# fullcone reliability 20261016
+fullcone_cleanup_source() {
+    local directory="$1" attempt
+    case "$directory" in "${RUNNER_TEMP:-${TMPDIR:-/tmp}}"/fullcone-source-*) ;; *) echo "::error::Unexpected cleanup path"; return 1 ;; esac
+    for attempt in 1 2 3; do
+      if rm -rf -- "$directory" && [ ! -e "$directory" ]; then return 0; fi
+      [ "$attempt" -eq 3 ] || sleep "$attempt"
+    done
+    echo "::error::Source cleanup still failed after retries: $directory"
+    return 1
+}
+
 process_repo() {
     local repo_url="$1"
     local repo_branch="$2"
     local platform="$3"
     echo "platform $platform: clone $repo_url（branch: $repo_branch）"
-    local temp_dir="temp_clone_$platform"
-    mkdir -p "$temp_dir"
-    git clone --filter=blob:none --branch "$repo_branch" "$repo_url" "$temp_dir"
+    local temp_dir
+    temp_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fullcone-source-${platform}.XXXXXX")" || return 1
+    git -c gc.auto=0 -c maintenance.auto=false clone --filter=blob:none --branch "$repo_branch" "$repo_url" "$temp_dir"
     if [[ $? -ne 0 ]]; then
         echo "error: clone $repo_url failed"
         exit 1
@@ -93,7 +105,7 @@ process_repo() {
     local feeds_file="$temp_dir/feeds.conf.default"
     if [[ ! -f "$feeds_file" ]]; then
         echo "error: not found $feeds_file"
-        rm -rf "$temp_dir"
+        fullcone_cleanup_source "$temp_dir" || return 1
         return 1
     fi
     echo "find feeds.conf file: $feeds_file"
@@ -125,7 +137,7 @@ process_repo() {
             fi
         fi
     done < "$feeds_file"
-    rm -rf "$temp_dir"
+    fullcone_cleanup_source "$temp_dir" || return 1
 }
 
 # 处理每个平台
@@ -148,3 +160,5 @@ for platform in "${source_code_platforms[@]}"; do
 done
 
 all_REPO_URLS+=("${feeds_REPO_URLS[@]}")
+all_REPO_URLS+=("${custompackages_REPO_URLS[@]}")
+all_REPO_URLS+=("https://github.com/openwrt/packages.git master" "https://github.com/pymumu/smartdns.git" "https://github.com/pymumu/smartdns-webui.git")
