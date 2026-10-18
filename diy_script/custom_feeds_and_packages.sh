@@ -1,7 +1,21 @@
 #!/bin/bash
+# fullcone reliability 20261016
+fullcone_retry_clone() {
+    local destination="${@: -1}" attempt
+    case "$destination" in package/custom_packages/*|temp_repo) ;; *) echo "::error::Unexpected clone destination"; return 1 ;; esac
+    for attempt in 1 2 3; do
+      if git -c gc.auto=0 -c maintenance.auto=false clone "$@"; then return 0; fi
+      rm -rf -- "$destination" || return 1
+      [ "$attempt" -eq 3 ] || sleep "$attempt"
+    done
+    echo "::error::Required custom source clone failed after three attempts: $destination"
+    return 1
+}
+
 
 # feeds扩展内容
 export repos=(
+  "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main"
   "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main"
   "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main"
   "src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main"
@@ -26,28 +40,28 @@ clone_custom_packages () {
     mkdir -p ${path}
 
     # 主题
-    git clone https://github.com/jerrykuku/luci-theme-argon.git ${path}luci-theme-argon
+    fullcone_retry_clone https://github.com/jerrykuku/luci-theme-argon.git ${path}luci-theme-argon || return 1
     # git clone https://github.com/jerrykuku/luci-app-argon-config.git ${path}luci-app-argon-config
-    git clone https://github.com/sirpdboy/luci-theme-kucat.git ${path}luci-theme-kucat
-    git clone https://github.com/sirpdboy/luci-app-kucat-config.git ${path}luci-app-kucat-config
-    git clone https://github.com/eamonxg/luci-theme-aurora.git ${path}luci-theme-aurora
-    git clone https://github.com/derisamedia/luci-theme-arwi.git ${path}luci-theme-arwi
-    git clone https://github.com/derisamedia/luci-theme-alpha.git ${path}luci-theme-alpha
-    git clone https://github.com/animegasan/luci-app-alpha-config.git ${path}luci-app-alpha-config
-    git clone https://github.com/AngelaCooljx/luci-theme-material3.git ${path}luci-theme-material3
+    fullcone_retry_clone https://github.com/sirpdboy/luci-theme-kucat.git ${path}luci-theme-kucat || return 1
+    fullcone_retry_clone https://github.com/sirpdboy/luci-app-kucat-config.git ${path}luci-app-kucat-config || return 1
+    fullcone_retry_clone https://github.com/eamonxg/luci-theme-aurora.git ${path}luci-theme-aurora || return 1
+    fullcone_retry_clone https://github.com/derisamedia/luci-theme-arwi.git ${path}luci-theme-arwi || return 1
+    fullcone_retry_clone https://github.com/derisamedia/luci-theme-alpha.git ${path}luci-theme-alpha || return 1
+    fullcone_retry_clone https://github.com/animegasan/luci-app-alpha-config.git ${path}luci-app-alpha-config || return 1
+    fullcone_retry_clone https://github.com/AngelaCooljx/luci-theme-material3.git ${path}luci-theme-material3 || return 1
 
-    git clone https://github.com/sbwml/luci-app-mosdns -b v5 ${path}mosdns
+    fullcone_retry_clone https://github.com/sbwml/luci-app-mosdns -b v5 ${path}mosdns || return 1
 
-    git clone https://github.com/sirpdboy/netspeedtest.git ${path}netspeedtest
+    fullcone_retry_clone https://github.com/sirpdboy/netspeedtest.git ${path}netspeedtest || return 1
 
-    git clone https://github.com/pymumu/openwrt-smartdns.git ${path}openwrt-smartdns
-    git clone https://github.com/pymumu/luci-app-smartdns.git ${path}luci-app-smartdns
+    fullcone_retry_clone https://github.com/pymumu/openwrt-smartdns.git ${path}openwrt-smartdns || return 1
+    fullcone_retry_clone https://github.com/pymumu/luci-app-smartdns.git ${path}luci-app-smartdns || return 1
 
-    git clone https://github.com/timsaya/openwrt-bandix.git ${path}openwrt-bandix
-    git clone https://github.com/timsaya/luci-app-bandix.git ${path}luci-app-bandix
+    fullcone_retry_clone https://github.com/timsaya/openwrt-bandix.git ${path}openwrt-bandix || return 1
+    fullcone_retry_clone https://github.com/timsaya/luci-app-bandix.git ${path}luci-app-bandix || return 1
 
-    git clone https://github.com/timsaya/openwrt-bandix-plus.git ${path}openwrt-bandix-plus
-    git clone https://github.com/timsaya/luci-app-bandix-plus.git ${path}luci-app-bandix-plus
+    fullcone_retry_clone https://github.com/timsaya/openwrt-bandix-plus.git ${path}openwrt-bandix-plus || return 1
+    fullcone_retry_clone https://github.com/timsaya/luci-app-bandix-plus.git ${path}luci-app-bandix-plus || return 1
     
     # git clone https://github.com/destan19/OpenAppFilter.git ${path}OpenAppFilter
 
