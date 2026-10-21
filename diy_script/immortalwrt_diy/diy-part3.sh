@@ -11,7 +11,10 @@
 # This script will be executed after `make defconfig` and `make download` to fix certain issues.
 #
 
-attempts=$1
+attempts="${1:-1}"
+
+# fullcone fail-fast diy-part3
+set -euo pipefail
 
 echo "DiY script part 3: is Runing"
 
@@ -21,11 +24,15 @@ echo "修正相关package的hash值"
 # echo "正在修正smartdns的hash值到最新版本"
 # current_path=$PWD
 # cd package/custom_packages/openwrt-smartdns
-# LATEST_TAG=$(curl -sL https://api.github.com/repos/pymumu/smartdns/releases/latest | jq -r .tag_name)
+# LATEST_TAG=$(curl --fail --retry 3 --retry-delay 2 -sSL https://api.github.com/repos/pymumu/smartdns/releases/latest | jq -r .tag_name)
 # # 过滤掉开头的英文字符，按照openwrt规定
 # CLEAN_VERSION=$(echo "$LATEST_TAG" | sed 's/^[a-zA-Z_]*//')
-# LATEST_SMARTDNS=$(curl -sL "https://api.github.com/repos/pymumu/smartdns/commits/$LATEST_TAG" | jq -r .sha)
-# LATEST_WEBUI=$(curl -sL https://api.github.com/repos/pymumu/smartdns-webui/commits | jq -r '.[0].sha')
+# LATEST_SMARTDNS=$(curl --fail --retry 3 --retry-delay 2 -sSL "https://api.github.com/repos/pymumu/smartdns/commits/$LATEST_TAG" | jq -r .sha)
+# LATEST_WEBUI=$(curl --fail --retry 3 --retry-delay 2 -sSL https://api.github.com/repos/pymumu/smartdns-webui/commits | jq -r '.[0].sha')
+[[ "$LATEST_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid SmartDNS tag"; exit 1; }
+[[ "$LATEST_SMARTDNS" =~ ^[0-9a-f]{40}$ && "$LATEST_WEBUI" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid SmartDNS revision"; exit 1; }
+printf 'smartdns-release=%s\nsmartdns=%s\nsmartdns-webui=%s\n' "$LATEST_TAG" "$LATEST_SMARTDNS" "$LATEST_WEBUI" >> ../../../source-versions.txt
+
 # if [ -z "$LATEST_SMARTDNS" ] || [ "$LATEST_SMARTDNS" == "null" ]; then
 #     echo "Failed to fetch SmartDNS commit"
 #     exit 1
@@ -101,3 +108,7 @@ echo "DiY script part 3: is Completed"
 # fi
 
 # echo "DiY script part 3: is Disabled"
+# fullcone reliability 20261016
+for source in feeds/* package/custom_packages/*; do
+  [ ! -d "$source/.git" ] || printf '%s=%s\n' "$source" "$(git -C "$source" rev-parse HEAD)" >> source-versions.txt
+done
