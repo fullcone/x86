@@ -548,55 +548,121 @@ jobs:
           echo "=== QEMU 桥接配置已添加 ==="
           tail -5 "$diy_part2"
 
-      - name: Use upstream SmartDNS custom package flow
+      - name: Use imported SmartDNS package flow
         run: |
           set -euo pipefail
-
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
+          custom = Path("diy_script/custom_feeds_and_packages.sh").read_text(encoding="utf-8")
+          active = "\n".join(line for line in custom.splitlines() if not line.lstrip().startswith("#"))
+          if "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" not in active:
+              if not re.search(r"(?m)^\s*(?:git clone|fullcone_retry_clone) https://github.com/pymumu/openwrt-smartdns.git ", active):
+                  raise SystemExit("Missing active SmartDNS backend import")
+          if not re.search(r"(?m)^\s*(?:git clone|fullcone_retry_clone) https://github.com/pymumu/luci-app-smartdns.git ", active):
+              raise SystemExit("Missing active SmartDNS LuCI import")
+          helper = r'''#!/usr/bin/env python3
+          """Select one imported SmartDNS provider and preserve its pinned sources."""
+          from pathlib import Path
+          import re
+          import shutil
+          import sys
 
-          custom = Path("diy_script/custom_feeds_and_packages.sh")
-          if not custom.exists():
-              raise SystemExit(f"missing custom package script: {custom}")
+          BACKENDS = (Path("feeds/passwall_packages/smartdns"),
+                      Path("package/custom_packages/openwrt-smartdns"),
+                      Path("feeds/packages/net/smartdns"))
+          LUCIS = (Path("package/custom_packages/luci-app-smartdns"),
+                   Path("feeds/luci/applications/luci-app-smartdns"))
 
-          custom_text = custom.read_text(encoding="utf-8")
-          required_clones = (
-              "github.com/pymumu/openwrt-smartdns.git",
-              "github.com/pymumu/luci-app-smartdns.git",
-          )
-          missing = [url for url in required_clones if url not in custom_text]
-          if missing:
-              raise SystemExit(f"upstream SmartDNS clone definitions are missing: {missing}")
+          def assignment(text, name):
+              values = re.findall(r"(?m)^[ \t]*" + re.escape(name) + r":=[ \t]*(\S+)[ \t]*$", text)
+              if len(values) != 1:
+                  raise SystemExit("Missing or ambiguous SmartDNS source field: " + name)
+              return values[0]
 
-          diy_part3 = Path("diy_script/immortalwrt_diy/diy-part3.sh")
-          if not diy_part3.exists():
-              raise SystemExit(f"missing diy-part3.sh: {diy_part3}")
+          def select():
+              # Stock SmartDNS may lack the dashboard. Only accept a complete imported provider.
+              backend = next((p for p in BACKENDS[:2] if (p / "Makefile").is_file()), None)
+              luci = next((p for p in LUCIS if (p / "Makefile").is_file()), None)
+              if backend is None or luci is None:
+                  raise SystemExit("Missing imported SmartDNS backend or LuCI package definition")
+              text = (backend / "Makefile").read_text(encoding="utf-8")
+              for package in ("smartdns", "smartdns-ui"):
+                  if len(re.findall(r"(?m)^define Package/" + package + r"[ \t]*$", text)) != 1:
+                      raise SystemExit("Selected SmartDNS provider must define " + package)
+              luci_text = (luci / "Makefile").read_text(encoding="utf-8")
+              if assignment(luci_text, "PKG_NAME") != "luci-app-smartdns" or not re.search(r"\+smartdns(?:[ \t\\]|$)", luci_text):
+                  raise SystemExit("Selected SmartDNS LuCI must depend on smartdns")
+              version = assignment(text, "PKG_VERSION")
+              pins = {name: assignment(text, name) for name in ("PKG_SOURCE_VERSION", "SMARTDNS_WEBUI_SOURCE_VERSION")}
+              if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in pins.values()):
+                  raise SystemExit("Invalid pinned SmartDNS source revision")
+              server_hash = assignment(text, "PKG_HASH" if re.search(r"(?m)^PKG_HASH:=", text) else "PKG_MIRROR_HASH")
+              if re.search(r"(?m)^SMARTDNS_WEBUI_HASH:=", text):
+                  web_hash = assignment(text, "SMARTDNS_WEBUI_HASH")
+              else:
+                  downloads = re.findall(r"(?ms)^define Download/smartdns-webui\n(.*?)^endef$", text)
+                  if len(downloads) != 1:
+                      raise SystemExit("Missing SmartDNS WebUI download definition")
+                  web_hash = assignment(downloads[0], "MIRROR_HASH")
+              if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in (server_hash, web_hash)):
+                  raise SystemExit("Invalid pinned SmartDNS source SHA256")
+              return backend, luci, version, pins, server_hash, web_hash
 
-          text = diy_part3.read_text(encoding="utf-8")
-          required_flow = (
-              "cd package/custom_packages/openwrt-smartdns",
-              "package/custom_packages/openwrt-smartdns/download",
-              "package/custom_packages/openwrt-smartdns/check FIXUP=1",
-          )
-          missing = [marker for marker in required_flow if marker not in text]
-          if missing:
-              raise SystemExit(f"upstream SmartDNS diy-part3 flow is incomplete: {missing}")
+          def main():
+              mode = sys.argv[1]
+              backend, luci, version, pins, server_hash, web_hash = select()
+              if mode == "prepare":
+                  # Validate the complete replacement before removing any duplicate package.
+                  # Enumerate entries, including dangling aliases left by a feed update.
+                  for link in Path("package/feeds").glob("*/*"):
+                      if link.name in ("smartdns", "smartdns-ui", "luci-app-smartdns") and link.is_symlink():
+                          link.unlink()
+                  for directory in BACKENDS + LUCIS:
+                      if directory not in (backend, luci) and directory.exists():
+                          shutil.rmtree(directory)
+              elif mode == "record":
+                  for directory in BACKENDS + LUCIS:
+                      if directory not in (backend, luci) and (directory / "Makefile").exists():
+                          raise SystemExit("Duplicate SmartDNS package definition: " + str(directory))
+                  for package, directory in (("smartdns", backend), ("luci-app-smartdns", luci)):
+                      if directory.parts[0] == "feeds":
+                          feed = directory.parts[1]
+                          installed = Path("package/feeds") / feed / package / "Makefile"
+                          if not installed.is_file() or installed.resolve() != (directory / "Makefile").resolve():
+                              raise SystemExit("Selected SmartDNS feed package was not installed: " + str(installed))
+                  with Path("source-versions.txt").open("a", encoding="utf-8") as output:
+                      output.write("smartdns-provider=" + backend.as_posix() + "\nsmartdns-luci=" + luci.as_posix() + "\n")
+                      output.write("smartdns-version=" + version + "\n")
+                      output.write("smartdns=" + pins["PKG_SOURCE_VERSION"] + "\nsmartdns-webui=" + pins["SMARTDNS_WEBUI_SOURCE_VERSION"] + "\n")
+                      output.write("smartdns-sha256=" + server_hash + "\nsmartdns-webui-sha256=" + web_hash + "\n")
+              else:
+                  raise SystemExit("Unknown SmartDNS preparation mode: " + mode)
+              print("SmartDNS " + mode + ": " + str(backend) + " (" + version + "), " + str(luci))
 
-          strict_marker = "# fullcone fail-fast diy-part3"
-          if strict_marker not in text:
+          if __name__ == "__main__":
+              main()
+          '''
+          Path("compile_script/fullcone_smartdns.py").write_text(helper, encoding="utf-8")
+
+          path = Path("diy_script/immortalwrt_diy/diy-part3.sh")
+          text = path.read_text(encoding="utf-8")
+          block = '# fullcone imported SmartDNS pinned sources\npython3 "$GITHUB_WORKSPACE/compile_script/fullcone_smartdns.py" record'
+          if "# -------------------------smartdns----------------------------------" in text:
+              start = text.index("# -------------------------smartdns----------------------------------")
+              end_marker = "# -------------------------end-smartdns----------------------------------"
+              end = text.index(end_marker, start) + len(end_marker)
+              text = text[:start] + block + text[end:]
+          elif block not in text:
+              raise SystemExit("Unrecognized SmartDNS diy-part3 flow")
+          if "# fullcone fail-fast diy-part3" not in text:
               anchor = "attempts=$1\n"
-              if anchor not in text:
-                  raise SystemExit("diy-part3 attempts anchor is missing")
-              replacement = 'attempts="${1:-1}"\n\n# fullcone fail-fast diy-part3\nset -euo pipefail\n'
-              text = text.replace(anchor, replacement, 1)
-              diy_part3.write_text(text, encoding="utf-8")
+              if text.count(anchor) != 1:
+                  raise SystemExit("diy-part3 attempts anchor is missing or ambiguous")
+              text = text.replace(anchor, 'attempts="${1:-1}"\n\n# fullcone fail-fast diy-part3\nset -euo pipefail\n', 1)
+          path.write_text(text, encoding="utf-8")
           PY
-
-          echo "=== Upstream SmartDNS custom package flow ==="
-          grep -n "pymumu/.*smartdns" diy_script/custom_feeds_and_packages.sh
-          grep -nE "fullcone fail-fast|package/custom_packages/openwrt-smartdns" \
-            diy_script/immortalwrt_diy/diy-part3.sh
 
       - name: Patch Nikki mihomo Kconfig conflict
         run: |
@@ -663,16 +729,8 @@ jobs:
               echo "Removed redundant mihomo-meta -> mihomo-alpha conflict"
           fi
 
-          # The custom SmartDNS sources remain authoritative. Installing the
-          # feed copies as well duplicates smartdns and smartdns-ui symbols.
-          for makefile in package/custom_packages/openwrt-smartdns/Makefile \
-              package/custom_packages/luci-app-smartdns/Makefile; do
-              test -f "$makefile" || {
-                  echo "Missing custom SmartDNS package definition: $makefile"
-                  exit 1
-              }
-          done
-          rm -rf feeds/packages/net/smartdns feeds/luci/applications/luci-app-smartdns
+          # fullcone imported SmartDNS provider selection
+          python3 "$PATCHES_SRC_DIR/compile_script/fullcone_smartdns.py" prepare
 
           if grep -qE '^[[:space:]]*CONFLICTS:=mihomo-meta[[:space:]]*$' "$nikki_alpha_makefile" \
               && grep -qE '^[[:space:]]*CONFLICTS:=mihomo-alpha[[:space:]]*$' "$nikki_meta_makefile"; then
@@ -866,7 +924,7 @@ jobs:
               fi
               case "$i" in
                   X86|X86_AllImages|X86_VMware)
-                      for package in nikki luci-app-nikki luci-i18n-nikki-zh-cn mihomo-meta tc-full fullcone-flow luci-app-accesspolicycontroller; do
+                      for package in nikki luci-app-nikki luci-i18n-nikki-zh-cn mihomo-meta tc-full fullcone-flow luci-app-accesspolicycontroller smartdns smartdns-ui luci-app-smartdns; do
                           grep -Fxq "CONFIG_PACKAGE_$package=y" .config || {
                               echo "Required Nikki package dropped by defconfig: $package ($i)"
                               exit 1
@@ -5408,7 +5466,7 @@ jobs:
           config=Path(sys.argv[1]).read_text().splitlines()
           manifests=list(Path(sys.argv[2]).glob('*.manifest'))
           if not manifests: raise SystemExit('Missing firmware manifest')
-          features=['nikki','luci-app-nikki','luci-i18n-nikki-zh-cn','mihomo-meta','fullcone-flow','luci-app-accesspolicycontroller','tc-full','smartdns','luci-app-smartdns']
+          features=['nikki','luci-app-nikki','luci-i18n-nikki-zh-cn','mihomo-meta','fullcone-flow','luci-app-accesspolicycontroller','tc-full','smartdns','smartdns-ui','luci-app-smartdns']
           for path in manifests:
               packages={line.split(' - ',1)[0] for line in path.read_text().splitlines()}
               missing=[p for p in features if 'CONFIG_PACKAGE_'+p+'=y' in config and p not in packages]
@@ -5442,12 +5500,6 @@ jobs:
           change('diy_script/immortalwrt_diy/diy-part2.sh',diy2)
           def diy3(s):
               s=s.replace('curl -sL ','curl --fail --retry 3 --retry-delay 2 -sSL ')
-              a="LATEST_WEBUI=$(curl --fail --retry 3 --retry-delay 2 -sSL https://api.github.com/repos/pymumu/smartdns-webui/commits | jq -r '.[0].sha')"
-              s=replace(s,a,a+'''
-          [[ "$LATEST_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid SmartDNS tag"; exit 1; }
-          [[ "$LATEST_SMARTDNS" =~ ^[0-9a-f]{40}$ && "$LATEST_WEBUI" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid SmartDNS revision"; exit 1; }
-          printf 'smartdns-release=%s\\nsmartdns=%s\\nsmartdns-webui=%s\\n' "$LATEST_TAG" "$LATEST_SMARTDNS" "$LATEST_WEBUI" >> ../../../source-versions.txt
-          ''')
               s+='''
           # fullcone reliability 20261016
           for source in feeds/* package/custom_packages/*; do
@@ -6928,7 +6980,7 @@ jobs:
               ),
               "diy_script/custom_feeds_and_packages.sh": (
                   "src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main",
-                  "github.com/pymumu/openwrt-smartdns.git",
+                  "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main",
                   "github.com/pymumu/luci-app-smartdns.git",
               ),
               "compile_script/update_checker.sh": (
@@ -6945,7 +6997,8 @@ jobs:
                   "# fullcone virtual provider dependency gates",
                   "Unexpected package-metadata.pl; cannot apply virtual provider fix",
                   "Nikki stable provider dependency was not applied",
-                  "Missing custom SmartDNS package definition",
+                  "# fullcone imported SmartDNS provider selection",
+                  'python3 "$PATCHES_SRC_DIR/compile_script/fullcone_smartdns.py" prepare',
                   "172.16.0.253",
                   "# Add QEMU bridge config",
                   'GHFU_DEFAULT_REPO="fullcone/x86"',
@@ -6956,8 +7009,8 @@ jobs:
               "diy_script/immortalwrt_diy/diy-part3.sh": (
                   "# fullcone fail-fast diy-part3",
                   "set -euo pipefail",
-                  "cd package/custom_packages/openwrt-smartdns",
-                  "package/custom_packages/openwrt-smartdns/check FIXUP=1",
+                  "# fullcone imported SmartDNS pinned sources",
+                  'python3 "$GITHUB_WORKSPACE/compile_script/fullcone_smartdns.py" record',
               ),
               "compile_script/step01_make_defconfig.sh": (
                   "# fullcone verify generated package configuration",
@@ -7026,20 +7079,18 @@ jobs:
               if len(blocks) != 1:
                   raise SystemExit(f"Expected exactly one generated {tag} fix")
               compile(blocks[0], tag, "exec")
-          obsolete_smartdns_markers = (
-              "# fullcone smartdns feed override",
-              "PKG_MIRROR_HASH:=skip",
-              "feeds/packages/net/smartdns",
-          )
-          # Removing duplicate feed copies is required; obsolete feed overrides
-          # remain forbidden. Permit only the exact, generated cleanup command.
-          duplicate_cleanup = "rm -rf feeds/packages/net/smartdns feeds/luci/applications/luci-app-smartdns"
-          smartdns_override_text = "\n".join(
-              line for line in diy_part2_text.splitlines() if line != duplicate_cleanup
-          )
-          leftovers = [marker for marker in obsolete_smartdns_markers if marker in smartdns_override_text]
-          if leftovers:
-              raise SystemExit(f"obsolete SmartDNS feed override remains in diy-part2.sh: {leftovers}")
+          # Check executable imports and generated provider handling, not commented URLs.
+          custom_text = Path("diy_script/custom_feeds_and_packages.sh").read_text(encoding="utf-8")
+          active = "\n".join(line for line in custom_text.splitlines() if not line.lstrip().startswith("#"))
+          for pattern in (r'^\s*"src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main"',
+                          r'^\s*(?:git clone|fullcone_retry_clone) https://github.com/pymumu/luci-app-smartdns.git '):
+              if not re.search(pattern, active, re.M):
+                  raise SystemExit("Missing active SmartDNS import: " + pattern)
+          helper = Path("compile_script/fullcone_smartdns.py").read_text(encoding="utf-8")
+          compile(helper, "fullcone_smartdns.py", "exec")
+          part3 = Path("diy_script/immortalwrt_diy/diy-part3.sh").read_text(encoding="utf-8")
+          if re.search(r'(?m)^(?![ \t]*#).*LATEST_(TAG|SMARTDNS|WEBUI)', part3):
+              raise SystemExit("Obsolete dynamic SmartDNS updater remains active")
 
           config_pattern = re.compile(r"^(?:# )?(CONFIG_[A-Za-z0-9_]+)(?:=| is not set$)")
           for path in sorted(Path("config/immortalwrt_config").glob("*.config")):
@@ -7132,6 +7183,7 @@ jobs:
           # their exact bytes in previews as well as their names in git status.
           assets=()
           for asset in \
+            compile_script/fullcone_smartdns.py \
             compile_script/fullcone_target_gpt.c \
             compile_script/fullcone_upgrade_gpt.c \
             compile_script/fullcone_upgrade_runtime.sh \
