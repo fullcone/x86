@@ -5723,6 +5723,21 @@ jobs:
               p.write_text('# fullcone UEFI smoke 20261016\n'+s,encoding='utf8')
 
           s=p.read_text(encoding='utf8')
+          if '# fullcone ISO boot opt-in 20261022' not in s:
+              boot_choice = 'inputs.run_iso_boot_test == true || github.event.client_payload.run_iso_boot_test == true'
+              gate = '$'+'{{ '+boot_choice+' }}'
+              log_gate = '$'+'{{ always() && ('+boot_choice+') }}'
+              s=replace(s,'        default: false\n\nconcurrency:\n',
+                  '        default: false\n      run_iso_boot_test:\n'
+                  "        description: 'Explicitly allow executing the installer ISO in QEMU'\n"
+                  '        required: false\n        type: boolean\n        default: false\n\nconcurrency:\n')
+              s=replace(s,'      - name: Smoke test ISO UEFI installer boot\n',
+                  '      - name: Smoke test ISO UEFI installer boot\n        if: '+gate+'\n')
+              s=replace(s,'      - name: Upload ISO UEFI smoke log\n        if: always()\n',
+                  '      - name: Upload ISO UEFI smoke log\n        if: '+log_gate+'\n')
+              p.write_text('# fullcone ISO boot opt-in 20261022\n'+s,encoding='utf8')
+
+          s=p.read_text(encoding='utf8')
           if '# fullcone Rust host predownload 20261016' not in s and '# fullcone Rust source verified 20261016' not in s:
               def rust_download(t):
                   t=replace(t,'              make $target -j1 || exit 1','''              download_log="$GITHUB_WORKSPACE/base-build-download-${target//\\//-}.log"
