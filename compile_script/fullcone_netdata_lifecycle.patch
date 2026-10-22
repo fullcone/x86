@@ -1,14 +1,32 @@
 --- a/database/sqlite/sqlite_metadata.c
 +++ b/database/sqlite/sqlite_metadata.c
-@@ -701,6 +701,7 @@
+@@ -76,6 +76,7 @@
+ struct metadata_cmd {
+     enum metadata_opcode opcode;
+     struct completion *completion;
++    int *result;
+     const void *param[MAX_PARAM_LIST];
+ };
+ 
+@@ -103,6 +104,8 @@
+     METADATA_FLAG flags;
+     uint64_t row_id;
+     struct completion init_complete;
++    int startup_result;
++    int shutdown_result;
+     /* FIFO command queue */
+     uv_mutex_t cmd_mutex;
+     uv_cond_t cmd_cond;
+@@ -701,6 +704,8 @@
  // EVENT LOOP STARTS HERE
  //
  static uv_mutex_t metadata_async_lock;
 +static int metadata_queue_ready;
++static int metadata_thread_joined;
  
  static void metadata_init_cmd_queue(struct metadata_wc *wc)
  {
-@@ -719,6 +720,7 @@
+@@ -719,6 +724,7 @@
  
      if (cmd->opcode == METADATA_SYNC_SHUTDOWN) {
          metadata_flag_set(wc, METADATA_FLAG_SHUTDOWN);
@@ -16,7 +34,7 @@
          uv_mutex_unlock(&wc->cmd_mutex);
          return 0;
      }
-@@ -739,42 +741,55 @@
+@@ -739,42 +745,54 @@
      return 0;
  }
  
@@ -72,12 +90,11 @@
 +    }
 +
 +    /* Serialize the complete send with the shutdown/close gate. */
-+    int rc = uv_async_send(&wc->async);
++    (void) uv_async_send(&wc->async);
      uv_mutex_unlock(&wc->cmd_mutex);
 -
 -    /* wake up event loop */
 -    (void) uv_async_send(&wc->async);
-+    fatal_assert(rc == 0);
 +    return 0;
 +}
 +
@@ -97,7 +114,7 @@
  }
  
  static struct metadata_cmd metadata_deq_cmd(struct metadata_wc *wc)
-@@ -784,7 +799,14 @@
+@@ -784,7 +802,14 @@
  
      uv_mutex_lock(&wc->cmd_mutex);
      queue_size = wc->queue_size;
@@ -113,7 +130,42 @@
          memset(&ret, 0, sizeof(ret));
          ret.opcode = METADATA_DATABASE_NOOP;
          ret.completion = NULL;
-@@ -1111,6 +1133,7 @@
+@@ -822,7 +847,7 @@
+     uv_update_time(handle->loop);
+ 
+    struct metadata_wc *wc = handle->data;
+-   struct metadata_cmd cmd;
++   struct metadata_cmd cmd = {0};
+    memset(&cmd, 0, sizeof(cmd));
+ 
+    time_t now = now_realtime_sec();
+@@ -863,6 +888,7 @@
+     uv_work_t request;
+     struct metadata_wc *wc;
+     struct completion *completion;
++    int *result;
+     uint32_t max_count;
+ };
+ 
+@@ -875,6 +901,8 @@
+     metadata_flag_clear(wc, METADATA_FLAG_SCANNING_HOSTS);
+     internal_error(true, "METADATA: scanning hosts complete");
+     if (unlikely(data->completion)) {
++        if (data->result)
++            *data->result = status;
+         completion_mark_complete(data->completion);
+         internal_error(true, "METADATA: Sending completion done");
+     }
+@@ -1101,7 +1129,7 @@
+ 
+     info("Starting metadata sync thread with %d entries command queue", METADATA_CMD_Q_MAX_SIZE);
+ 
+-    struct metadata_cmd cmd;
++    struct metadata_cmd cmd = {0};
+     memset(&cmd, 0, sizeof(cmd));
+     metadata_flag_clear(wc, METADATA_FLAG_CLEANUP);
+     metadata_flag_clear(wc, METADATA_FLAG_SCANNING_HOSTS);
+@@ -1111,6 +1139,7 @@
  
      int shutdown = 0;
      wc->row_id = 0;
@@ -121,16 +173,36 @@
      completion_mark_complete(&wc->init_complete);
  
      while (shutdown == 0 || (wc->flags & METADATA_WORKER_BUSY)) {
-@@ -1190,6 +1213,8 @@
+@@ -1173,6 +1202,7 @@
+                     data->request.data = data;
+                     data->wc = wc;
+                     data->completion = cmd.completion;  // Completion by the worker
++                    data->result = cmd.result;
+ 
+                     if (unlikely(cmd.completion)) {
+                         data->max_count = 0;            // 0 will process all pending updates
+@@ -1182,14 +1212,16 @@
+                         data->max_count = 5000;
+ 
+                     metadata_flag_set(wc, METADATA_FLAG_SCANNING_HOSTS);
+-                    if (unlikely(
+-                            uv_queue_work(loop,&data->request,
+-                                          start_metadata_hosts,
+-                                          after_metadata_hosts))) {
++                    int scan_rc = uv_queue_work(loop, &data->request,
++                                                start_metadata_hosts, after_metadata_hosts);
++                    if (unlikely(scan_rc)) {
+                         // Failed to launch worker -- let the event loop handle completion
                          cmd.completion = data->completion;
                          freez(data);
                          metadata_flag_clear(wc, METADATA_FLAG_SCANNING_HOSTS);
-+                        // Never report an unexecuted final scan as completed.
-+                        fatal_assert(cmd.completion == NULL);
++                        if (cmd.result)
++                            *cmd.result = scan_rc;
++                        error("METADATA: Cannot start host scan: %s", uv_strerror(scan_rc));
                      }
                      break;
                  case METADATA_MAINTENANCE:
-@@ -1217,24 +1242,21 @@
+@@ -1217,25 +1249,26 @@
          } while (opcode != METADATA_DATABASE_NOOP);
      }
  
@@ -162,14 +234,20 @@
 -        rc = uv_loop_close(loop);
 -    } while (rc != UV_EBUSY);
 -
-+    fatal_assert(0 == metadata_close_loop(loop));
-+    uv_mutex_lock(&wc->cmd_mutex);
-+    wc->loop = NULL;
-+    uv_mutex_unlock(&wc->cmd_mutex);
-     freez(loop);
+-    freez(loop);
++    wc->shutdown_result = metadata_close_loop(loop);
++    if (wc->shutdown_result == 0) {
++        uv_mutex_lock(&wc->cmd_mutex);
++        wc->loop = NULL;
++        uv_mutex_unlock(&wc->cmd_mutex);
++        freez(loop);
++    }
++    else
++        error("METADATA: Event loop close failed; retaining loop: %s", uv_strerror(wc->shutdown_result));
      worker_unregister();
  
-@@ -1243,11 +1265,16 @@
+     info("METADATA: Shutting down event loop");
+@@ -1243,57 +1276,86 @@
      return;
  
  error_after_timer_init:
@@ -180,37 +258,138 @@
 +    uv_mutex_unlock(&wc->cmd_mutex);
  error_after_async_init:
 -    fatal_assert(0 == uv_loop_close(loop));
-+    fatal_assert(0 == metadata_close_loop(loop));
++    if (metadata_close_loop(loop) == 0) {
++        wc->loop = NULL;
++        freez(loop);
++    }
++    goto error_init_complete;
  error_after_loop_init:
--    freez(loop);
-+    /* Initialization failure cannot be reported as a ready/shutdown worker. */
-+    fatal("METADATA: event loop initialization failed");
++    wc->loop = NULL;
+     freez(loop);
++error_init_complete:
++    uv_mutex_lock(&wc->cmd_mutex);
++    metadata_flag_set(wc, METADATA_FLAG_SHUTDOWN);
++    uv_cond_broadcast(&wc->cmd_cond);
++    wc->startup_result = ret;
++    uv_mutex_unlock(&wc->cmd_mutex);
      worker_unregister();
++    completion_mark_complete(&wc->init_complete);
  }
  
-@@ -1261,7 +1288,7 @@
-     memset(&cmd, 0, sizeof(cmd));
-     info("METADATA: Sending a shutdown command");
-     cmd.opcode = METADATA_SYNC_SHUTDOWN;
--    metadata_enq_cmd(&metasync_worker, &cmd);
-+    fatal_assert(0 == metadata_enq_cmd(&metasync_worker, &cmd));
+ struct metadata_wc metasync_worker = {.loop = NULL};
  
-     /* wait for metadata thread to shut down */
-     info("METADATA: Waiting for shutdown ACK");
-@@ -1288,7 +1315,11 @@
- 
-     cmd.opcode = METADATA_SCAN_HOSTS;
-     cmd.completion = &compl;
--    metadata_enq_cmd(&metasync_worker, &cmd);
-+    if (metadata_enq_cmd(&metasync_worker, &cmd)) {
-+        completion_destroy(&compl);
-+        error("METADATA: Final host scan rejected: shutdown already requested");
-+        return;
+-void metadata_sync_shutdown(void)
+-{
++int metadata_sync_shutdown(void)
++{
++    if (!__atomic_load_n(&metadata_queue_ready, __ATOMIC_ACQUIRE))
++        return 0;
++    uv_mutex_lock(&metadata_async_lock);
++    if (metadata_thread_joined) {
++        int result = metasync_worker.shutdown_result;
++        uv_mutex_unlock(&metadata_async_lock);
++        return result;
 +    }
+     completion_init(&metasync_worker.init_complete);
+-
+-    struct metadata_cmd cmd;
+-    memset(&cmd, 0, sizeof(cmd));
+-    info("METADATA: Sending a shutdown command");
+-    cmd.opcode = METADATA_SYNC_SHUTDOWN;
+-    metadata_enq_cmd(&metasync_worker, &cmd);
+-
+-    /* wait for metadata thread to shut down */
+-    info("METADATA: Waiting for shutdown ACK");
+-    completion_wait_for(&metasync_worker.init_complete);
++    struct metadata_cmd cmd = {.opcode = METADATA_SYNC_SHUTDOWN};
++    int result = metadata_enq_cmd(&metasync_worker, &cmd);
++    if (!result) {
++        completion_wait_for(&metasync_worker.init_complete);
++        result = uv_thread_join(&metasync_worker.thread);
++        if (!result) {
++            metadata_thread_joined = 1;
++            result = metasync_worker.shutdown_result;
++        }
++    }
++    else
++        result = UV_ECANCELED;
+     completion_destroy(&metasync_worker.init_complete);
+-    info("METADATA: Shutdown complete");
+-}
+-
+-void metadata_sync_shutdown_prepare(void)
+-{
+-    struct metadata_cmd cmd;
+-    memset(&cmd, 0, sizeof(cmd));
+-
++    uv_mutex_unlock(&metadata_async_lock);
++    if (result)
++        error("METADATA: Shutdown failed: %s", uv_strerror(result));
++    else
++        info("METADATA: Shutdown complete");
++    return result;
++}
++
++int metadata_sync_shutdown_prepare(void)
++{
++    if (!__atomic_load_n(&metadata_queue_ready, __ATOMIC_ACQUIRE))
++        return 0;
++    uv_mutex_lock(&metadata_async_lock);
+     struct completion compl;
+     completion_init(&compl);
+-
+-    info("METADATA: Sending a scan host command");
+-    uint32_t max_wait_iterations = 2000;
+-    while (unlikely(metadata_flag_check(&metasync_worker, METADATA_FLAG_SCANNING_HOSTS)) && max_wait_iterations--) {
+-        if (max_wait_iterations == 1999)
+-            info("METADATA: Current worker is running; waiting to finish");
+-        sleep_usec(1000);
+-    }
+-
+-    cmd.opcode = METADATA_SCAN_HOSTS;
+-    cmd.completion = &compl;
+-    metadata_enq_cmd(&metasync_worker, &cmd);
+-
+-    info("METADATA: Waiting for host scan completion");
+-    completion_wait_for(&compl);
++    int result = 0;
++    struct metadata_cmd cmd = {
++        .opcode = METADATA_SCAN_HOSTS, .completion = &compl, .result = &result
++    };
++    if (metadata_enq_cmd(&metasync_worker, &cmd))
++        result = UV_ECANCELED;
++    else
++        completion_wait_for(&compl);
+     completion_destroy(&compl);
+-    info("METADATA: Host scan complete; can continue with shutdown");
++    uv_mutex_unlock(&metadata_async_lock);
++    if (result)
++        error("METADATA: Final host scan failed: %s", uv_strerror(result));
++    else
++        info("METADATA: Host scan complete; can continue with shutdown");
++    return result;
+ }
  
-     info("METADATA: Waiting for host scan completion");
-     completion_wait_for(&compl);
-@@ -1327,15 +1358,18 @@
+ // -------------------------------------------------------------
+@@ -1314,6 +1376,11 @@
+     completion_wait_for(&wc->init_complete);
+     completion_destroy(&wc->init_complete);
+ 
++    if (wc->startup_result) {
++        (void) uv_thread_join(&wc->thread);
++        // This runs on the initializing caller, never the METASYNC worker.
++        fatal("METADATA: Event loop initialization failed: %s", uv_strerror(wc->startup_result));
++    }
+     info("SQLite metadata sync initialization complete");
+ }
+ 
+@@ -1322,20 +1389,23 @@
+ 
+ static inline void queue_metadata_cmd(enum metadata_opcode opcode, const void *param0, const void *param1)
+ {
+-    struct metadata_cmd cmd;
++    struct metadata_cmd cmd = {0};
+     cmd.opcode = opcode;
      cmd.param[0] = param0;
      cmd.param[1] = param1;
      cmd.completion = NULL;
@@ -233,7 +412,7 @@
      uuid_t *use_uuid = mallocz(sizeof(*uuid));
      uuid_copy(*use_uuid, *uuid);
      queue_metadata_cmd(METADATA_DEL_DIMENSION, use_uuid, NULL);
-@@ -1359,8 +1393,6 @@
+@@ -1359,8 +1429,6 @@
  
  void metaqueue_host_update_info(RRDHOST *host)
  {
@@ -241,4 +420,86 @@
 -        return;
      queue_metadata_cmd(METADATA_ADD_HOST_INFO, host, NULL);
  }
+ 
+@@ -1371,7 +1439,7 @@
+ static void *unittest_queue_metadata(void *arg) {
+     struct thread_unittest *tu = arg;
+ 
+-    struct metadata_cmd cmd;
++    struct metadata_cmd cmd = {0};
+     cmd.opcode = METADATA_UNITTEST;
+     cmd.param[0] = tu;
+     cmd.param[1] = NULL;
+--- a/database/sqlite/sqlite_metadata.h
++++ b/database/sqlite/sqlite_metadata.h
+@@ -8,8 +8,8 @@
+ 
+ // To initialize and shutdown
+ void metadata_sync_init(void);
+-void metadata_sync_shutdown(void);
+-void metadata_sync_shutdown_prepare(void);
++int metadata_sync_shutdown(void);
++int metadata_sync_shutdown_prepare(void);
+ 
+ void metaqueue_delete_dimension_uuid(uuid_t *uuid);
+ void metaqueue_store_claim_id(uuid_t *host_uuid, uuid_t *claim_uuid);
+--- a/daemon/main.c
++++ b/daemon/main.c
+@@ -317,6 +317,7 @@
+     usec_t last_ut = started_ut;
+     const char *prev_msg = NULL;
+     bool timeout = false;
++    int metadata_shutdown_result = 0;
+ 
+     error_log_limit_unlimited();
+     info("NETDATA SHUTDOWN: initializing shutdown with code %d...", ret);
+@@ -385,7 +386,7 @@
+ 
+     delta_shutdown_time("prepare metasync shutdown");
+ 
+-    metadata_sync_shutdown_prepare();
++    int metadata_prepare_result = metadata_sync_shutdown_prepare();
+ 
+ #ifdef ENABLE_ACLK
+     delta_shutdown_time("signal aclk sync to stop");
+@@ -425,7 +426,9 @@
+ 
+         delta_shutdown_time("stop metasync threads");
+ 
+-        metadata_sync_shutdown();
++        metadata_shutdown_result = metadata_sync_shutdown();
++        if (metadata_shutdown_result)
++            goto metadata_shutdown_failed;
+ 
+ #ifdef ENABLE_DBENGINE
+         if(dbengine_enabled) {
+@@ -455,6 +458,14 @@
+ #endif
+     }
+ 
++    // Error exits must also stop metadata before releasing its SQL resources.
++    if (ret)
++        metadata_shutdown_result = metadata_sync_shutdown();
++    if (metadata_shutdown_result)
++        goto metadata_shutdown_failed;
++    if (metadata_prepare_result)
++        ret = 1;
++
+     delta_shutdown_time("close SQL context db");
+ 
+     sql_close_context_database();
+@@ -479,6 +490,14 @@
+     delta_shutdown_time("remove incomplete shutdown file");
+ 
+     (void) unlink(agent_incomplete_shutdown_file);
++
++metadata_shutdown_failed:
++    if (metadata_shutdown_result) {
++        // An unclosed loop may still own requests using these shared resources.
++        // Keep them and the incomplete-shutdown marker until normal process exit.
++        error("NETDATA SHUTDOWN: metadata loop not closed; retaining shared resources");
++        ret = 1;
++    }
+ 
+     delta_shutdown_time("exit");
  
