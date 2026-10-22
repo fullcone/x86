@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: ''
+      run_iso_boot_test:
+        description: 'Run the normal installer ISO boot test; explicitly false skips target execution'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -5723,6 +5728,21 @@ jobs:
               p.write_text('# fullcone UEFI smoke 20261016\n'+s,encoding='utf8')
 
           s=p.read_text(encoding='utf8')
+          if '# fullcone ISO boot override 20261022' not in s:
+              boot_choice = "toJSON(inputs.run_iso_boot_test) != 'false' && toJSON(github.event.client_payload.run_iso_boot_test) != 'false'"
+              gate = '$'+'{{ '+boot_choice+' }}'
+              log_gate = '$'+'{{ always() && ('+boot_choice+') }}'
+              s=replace(s,'        default: false\n\nconcurrency:\n',
+                  '        default: false\n      run_iso_boot_test:\n'
+                  "        description: 'Run the normal installer ISO boot test; explicitly false skips target execution'\n"
+                  '        required: false\n        type: boolean\n        default: true\n\nconcurrency:\n')
+              s=replace(s,'      - name: Smoke test ISO UEFI installer boot\n',
+                  '      - name: Smoke test ISO UEFI installer boot\n        if: '+gate+'\n')
+              s=replace(s,'      - name: Upload ISO UEFI smoke log\n        if: always()\n',
+                  '      - name: Upload ISO UEFI smoke log\n        if: '+log_gate+'\n')
+              p.write_text('# fullcone ISO boot override 20261022\n'+s,encoding='utf8')
+
+          s=p.read_text(encoding='utf8')
           if '# fullcone Rust host predownload 20261016' not in s and '# fullcone Rust source verified 20261016' not in s:
               def rust_download(t):
                   t=replace(t,'              make $target -j1 || exit 1','''              download_log="$GITHUB_WORKSPACE/base-build-download-${target//\\//-}.log"
@@ -7294,17 +7314,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.X86OPENWRT }}
           FC_BUILD_PLATFORMS: ${{ inputs.build_platforms || '' }}
+          FC_RUN_ISO_BOOT_TEST: ${{ toJSON(inputs.run_iso_boot_test) }}
         run: |
           set -euo pipefail
           python3 - <<'DISPATCH' > "$RUNNER_TEMP/fullcone-build-dispatch.json"
           import json,os,re
           value=os.environ.get('FC_BUILD_PLATFORMS','').strip()
-          payload={'event_type':'openwrt_source_update_v6'}
+          boot=json.loads(os.environ.get('FC_RUN_ISO_BOOT_TEST','null'))
+          if boot is None or boot == '':
+              boot=True
+          if type(boot) is not bool:
+              raise SystemExit('ISO boot option must be a JSON boolean')
+          payload={'event_type':'openwrt_source_update_v6','client_payload':{'run_iso_boot_test':boot}}
           if value:
               names=[name.strip() for name in value.split(',')]
               if any(not re.fullmatch(r'[A-Za-z0-9_]+',name) for name in names) or len(names)!=len(set(names)):
                   raise SystemExit('Invalid requested build platforms')
-              payload['client_payload']={'build_platforms':','.join(names)}
+              payload['client_payload']['build_platforms']=','.join(names)
           print(json.dumps(payload))
           DISPATCH
           gh api --method POST -H "Accept: application/vnd.github+json" \

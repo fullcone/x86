@@ -1,3 +1,4 @@
+# fullcone ISO boot override 20261022
 # fullcone UEFI smoke 20261016
 # fullcone scoped rebuild 20261016
 # fullcone ISO integrity 20261016
@@ -28,6 +29,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_iso_boot_test:
+        description: 'Run the normal installer ISO boot test; explicitly false skips target execution'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: openwrt-repository-${{ github.repository }}-${{ github.ref }}
@@ -2443,6 +2449,7 @@ jobs:
           ls -lh "$ISO_OUTPUT_DIR/$iso_name" "$ISO_OUTPUT_DIR/$iso_name.sha256"
 
       - name: Smoke test ISO UEFI installer boot
+        if: ${{ toJSON(inputs.run_iso_boot_test) != 'false' && toJSON(github.event.client_payload.run_iso_boot_test) != 'false' }}
         env:
           ISO_DIR: ${{ steps.build_x86_installer_iso.outputs.ISO_DIR }}
         run: |
@@ -2463,7 +2470,7 @@ jobs:
           echo "UEFI boot reached installer menu; no target disks were attached or written"
 
       - name: Upload ISO UEFI smoke log
-        if: always()
+        if: ${{ always() && (toJSON(inputs.run_iso_boot_test) != 'false' && toJSON(github.event.client_payload.run_iso_boot_test) != 'false') }}
         uses: actions/upload-artifact@v7
         with:
           name: iso_uefi_smoke_${{ github.run_attempt }}
