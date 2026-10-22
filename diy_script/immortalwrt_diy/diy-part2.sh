@@ -1485,3 +1485,6 @@ echo "FullConeFlow staged into package/"
 
 # fullcone checked x86 upgrade generator 20261018
 python3 "$GITHUB_WORKSPACE/compile_script/fullcone_patch_sysupgrade.py"
+
+# fullcone Netdata metadata lifecycle 20261022
+python3 "$GITHUB_WORKSPACE/compile_script/fullcone_netdata.py"
