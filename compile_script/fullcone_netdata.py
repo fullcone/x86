@@ -14,14 +14,17 @@ def prepare(root=Path('.')):
         raise SystemExit('Unexpected Netdata source archive hash')
     destination = package / 'patches/005-fullcone-metadata-shutdown-lifecycle.patch'
     patch = Path(__file__).with_name('fullcone_netdata_lifecycle.patch').read_bytes()
-    if destination.exists() and destination.read_bytes() != patch:
+    staged = destination.exists()
+    if staged and destination.read_bytes() != patch:
         raise SystemExit('Refusing to overwrite a different Netdata lifecycle patch')
-    # Keep upstream release ancestry while invalidating cached package binaries.
-    if not re.search(r'^PKG_RELEASE:=\d+(?:\.fullcone1)?$', text, re.M):
-        raise SystemExit('Unexpected Netdata package release')
+    # APK requires a numeric release: r3.fullcone1 is rejected. Fresh upstream
+    # release 4 still needs review; only our matching staged patch can reuse it.
+    release = re.search(r'^PKG_RELEASE:=(\S+)$', text, re.M)
+    if not release or not (release[1] == '3' or (staged and release[1] in ('3.fullcone1', '4'))):
+        raise SystemExit('Netdata package release requires review')
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(patch)
-    text = re.sub(r'^(PKG_RELEASE:=\d+)(?:\.fullcone1)?$', r'\1.fullcone1', text, flags=re.M)
+    text = re.sub(r'^PKG_RELEASE:=\S+$', 'PKG_RELEASE:=4', text, flags=re.M)
     recipe.write_text(text, encoding='utf8', newline='\n')
     print('Staged Netdata lifecycle fix; Netdata remains enabled')
 

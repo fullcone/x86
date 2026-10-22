@@ -8,6 +8,60 @@ from pathlib import Path
 import argparse
 import subprocess
 import tempfile
+import importlib.util
+import sys
+
+
+def staging_tests():
+    sys.dont_write_bytecode = True
+    helper = Path(__file__).with_name('fullcone_netdata.py')
+    spec = importlib.util.spec_from_file_location('netdata_stage', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory(prefix='netdata-package-guards-') as directory:
+        root = Path(directory)
+        package = root / 'feeds/packages/admin/netdata'
+        package.mkdir(parents=True)
+        recipe = package / 'Makefile'
+        upstream = 'PKG_VERSION:=1.38.1\nPKG_RELEASE:=3\nPKG_HASH:=e32a5427f0c00550210dbbf0046c2621313955256edf836db686e2bc270b8d10\n'
+        recipe.write_text(upstream, encoding='utf8')
+        module.prepare(root)
+        once = recipe.read_bytes()
+        assert b'PKG_RELEASE:=4\n' in once
+        module.prepare(root)
+        assert recipe.read_bytes() == once
+        # Upgrade an old candidate only when the exact source patch is present.
+        recipe.write_text(upstream.replace('PKG_RELEASE:=3', 'PKG_RELEASE:=3.fullcone1'), encoding='utf8')
+        module.prepare(root)
+        assert recipe.read_bytes() == once
+        patch = package / 'patches/005-fullcone-metadata-shutdown-lifecycle.patch'
+        patch.unlink()
+        for rejected in (
+            upstream.replace('PKG_RELEASE:=3', 'PKG_RELEASE:=4'),
+            upstream.replace('PKG_RELEASE:=3', 'PKG_RELEASE:=3.fullcone1'),
+            upstream.replace('1.38.1', '1.39.0'),
+            upstream.replace('e32a5427', 'deadbeef'),
+        ):
+            recipe.write_text(rejected, encoding='utf8')
+            try:
+                module.prepare(root)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('Unreviewed source/release was accepted')
+            assert not patch.exists()
+            assert recipe.read_text(encoding='utf8') == rejected
+        patch.write_text('different patch', encoding='utf8')
+        recipe.write_text(upstream, encoding='utf8')
+        try:
+            module.prepare(root)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError('Different lifecycle patch was overwritten')
+        assert patch.read_text() == 'different patch'
+        assert recipe.read_text(encoding='utf8') == upstream
+    print('PASS: numeric APK release, idempotence, migration and upstream/conflict guards')
 
 
 def function(source, name):
@@ -367,6 +421,7 @@ if __name__ == '__main__':
     parser.add_argument('--main-source', type=Path)
     parser.add_argument('--log-source', type=Path)
     args = parser.parse_args()
+    staging_tests()
     tree=args.source.resolve().parents[2]
     main_source=args.main_source or tree/'daemon/main.c'
     log_source=args.log_source or tree/'libnetdata/log/log.c'
