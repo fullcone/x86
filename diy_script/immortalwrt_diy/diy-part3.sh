@@ -11,41 +11,17 @@
 # This script will be executed after `make defconfig` and `make download` to fix certain issues.
 #
 
-attempts=$1
+attempts="${1:-1}"
+
+# fullcone fail-fast diy-part3
+set -euo pipefail
 
 echo "DiY script part 3: is Runing"
 
 echo "修正相关package的hash值"
 
-# -------------------------smartdns----------------------------------
-# echo "正在修正smartdns的hash值到最新版本"
-# current_path=$PWD
-# cd package/custom_packages/openwrt-smartdns
-# LATEST_TAG=$(curl -sL https://api.github.com/repos/pymumu/smartdns/releases/latest | jq -r .tag_name)
-# # 过滤掉开头的英文字符，按照openwrt规定
-# CLEAN_VERSION=$(echo "$LATEST_TAG" | sed 's/^[a-zA-Z_]*//')
-# LATEST_SMARTDNS=$(curl -sL "https://api.github.com/repos/pymumu/smartdns/commits/$LATEST_TAG" | jq -r .sha)
-# LATEST_WEBUI=$(curl -sL https://api.github.com/repos/pymumu/smartdns-webui/commits | jq -r '.[0].sha')
-# if [ -z "$LATEST_SMARTDNS" ] || [ "$LATEST_SMARTDNS" == "null" ]; then
-#     echo "Failed to fetch SmartDNS commit"
-#     exit 1
-# fi
-# echo ">> 获取到 SmartDNS 最新版本: $LATEST_TAG (Commit: $LATEST_SMARTDNS)"
-# echo ">> 提取到合法数字版本号: $CLEAN_VERSION (原始Tag: $LATEST_TAG)"
-# echo ">> 获取到 WebUI 最新 Commit: $LATEST_WEBUI"
-# sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$CLEAN_VERSION/g" Makefile
-# sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=1/g" Makefile
-# sed -i "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$LATEST_SMARTDNS/g" Makefile
-# sed -i "s/^SMARTDNS_WEBUI_SOURCE_VERSION:=.*/SMARTDNS_WEBUI_SOURCE_VERSION:=$LATEST_WEBUI/g" Makefile
-# sed -i "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$LATEST_SMARTDNS/g" Makefile
-# sed -i "s/^SMARTDNS_WEBUI_SOURCE_VERSION:=.*/SMARTDNS_WEBUI_SOURCE_VERSION:=$LATEST_WEBUI/g" Makefile
-# sed -i 's/^PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=/g' Makefile
-# sed -i 's/^[[:space:]]*MIRROR_HASH:=.*/\tMIRROR_HASH:=/g' Makefile
-# cd $current_path
-# make defconfig > /dev/null
-# make package/custom_packages/openwrt-smartdns/download -j8
-# make package/custom_packages/openwrt-smartdns/check FIXUP=1 V=s
-# -------------------------end-smartdns----------------------------------
+# fullcone imported SmartDNS pinned sources
+python3 "$GITHUB_WORKSPACE/compile_script/fullcone_smartdns.py" record
 
 # -------------------------shadowsocksr-libev----------------------------------
 # make package/feeds/passwall_packages/shadowsocksr-libev/download -j8
@@ -101,3 +77,7 @@ echo "DiY script part 3: is Completed"
 # fi
 
 # echo "DiY script part 3: is Disabled"
+# fullcone reliability 20261016
+for source in feeds/* package/custom_packages/*; do
+  [ ! -d "$source/.git" ] || printf '%s=%s\n' "$source" "$(git -C "$source" rev-parse HEAD)" >> source-versions.txt
+done
