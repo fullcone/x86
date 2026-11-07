@@ -1,4 +1,6 @@
 #!/bin/bash
+set -eo pipefail
+# fullcone reliability 20261016
 #
 # Copyright (c) 2019-2025 SmallProgram <https://github.com/smallprogram>
 #
