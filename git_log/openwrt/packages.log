@@ -1,9 +1,0 @@
-<details> <summary> <b>packages new commit log :rocket: </b> </summary>
-
-#### [:mega: Full Changelog. ](https://github.com/openwrt/packages/compare/07e0d16305d2b5903b37ad7913e33e18795f81a4...c2c619e6f065b238ab000b6cfc5afa238658b0c9)  
-:heavy_exclamation_mark: The list displays only the latest 15 commit logs.  
-
-SHA|Author|Date|Message
--|-|-|-
-c2c619e6f|Josef Schlehofer|Thu Nov 12 05:36:21 2026 +0100|apache: update to version 2.4.71
-</details>
