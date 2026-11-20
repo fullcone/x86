@@ -1288,7 +1288,8 @@ jobs:
   job_build_x86_installer_iso:
     needs: [job_init, job_compile_and_upload]
     if: always() && !cancelled() && needs.job_init.result == 'success' && contains(fromJSON(needs.job_init.outputs.platforms).*.platform, 'X86')
-    runs-on: ubuntu-latest
+    # The installer depends on the host OS kernel and GRUB packages.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     name: Build-X86-Installer-ISO
     steps:
