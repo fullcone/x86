@@ -6847,6 +6847,154 @@ jobs:
           Path('compile_script/test_netdata_lifecycle.py').write_text(Path('compile_script/test_netdata_lifecycle.py').read_text(encoding='utf8')+'adata_deq_cmd(&metasync_worker);\n   assert(cmd.opcode==METADATA_SCAN_HOSTS);\n   process_scan(&metasync_worker,metasync_worker.loop,cmd);\n   if(pending_work) { pending_after(pending_work,0); pending_work=NULL; }\n }\n role=MAIN_ROLE;\n assert(c->completed==1);\n}\n\'\'\'\n\nTESTS = r\'\'\'\nstatic void reset(struct metadata_wc *w) {\n memset(w,0,sizeof(*w)); wait_worker=w; sends=broadcasts=waits=releases=runs=closes=0;\n close_index=0; close_length=1; close_values[0]=0; fail_work=0; pending_work=NULL;\n lifecycle_mode=pending_closes=persistent_busy=close_error=0;\n metadata_async_lock.held=0; metadata_thread_joined=0; role=MAIN_ROLE;\n joins=cleanup_calls=self_waits=exit_code=sql_closes=context_closes=openssl_frees=finalizes=incomplete_unlinks=fatal_count=0;\n}\nint main(void) {\n static struct metadata_wc w; struct metadata_cmd cmd={.opcode=METADATA_ADD_HOST_INFO}; uv_loop_t loop;\n reset(&w); assert(metadata_close_loop(&loop)==0); assert(closes==1 && runs==0);\n reset(&w); close_length=2; close_values[0]=UV_EBUSY; close_values[1]=0;\n assert(metadata_close_loop(&loop)==0); assert(closes==2 && runs==1 && releases==0);\n reset(&w); close_values[0]=UV_EBUSY;\n assert(metadata_close_loop(&loop)==UV_EBUSY); assert(closes==1024 && runs==1024 && releases==0);\n reset(&w); close_values[0]=-22;\n assert(metadata_close_loop(&loop)==-22); assert(closes==1 && runs==0 && releases==0);\n\n reset(&w); lifecycle_mode=1; w.loop=mallocz(sizeof(loop));\n teardown(&w,w.loop); assert(closes==2 && runs==1 && releases==1);\n assert(w.loop==NULL && w.init_complete.completed==1 && w.async.closed && w.timer_req.closed);\n reset(&w); lifecycle_mode=1; persistent_busy=1; w.loop=mallocz(sizeof(loop));\n teardown(&w,w.loop);\n assert(!releases && w.init_complete.completed==1 && w.shutdown_result==UV_EBUSY && w.loop && !fatal_count); free(w.loop);\n reset(&w); lifecycle_mode=1; close_error=-22; w.loop=mallocz(sizeof(loop));\n teardown(&w,w.loop);\n assert(!releases && w.init_complete.completed==1 && w.shutdown_result==-22 && w.loop && !fatal_count); free(w.loop);\n\n reset(&w); assert(!metadata_enq_cmd(&w,&cmd)); assert(sends==1 && w.queue_size==1);\n cmd.opcode=METADATA_SYNC_SHUTDOWN; assert(!metadata_enq_cmd(&w,&cmd)); assert(sends==2 && broadcasts==1);\n w.async.closed=1; cmd.opcode=METADATA_ADD_HOST_INFO;\n assert(metadata_enq_cmd(&w,&cmd)==1); assert(sends==2 && w.queue_size==1);\n /* Full queue wakes to both a newly free slot and SHUTDOWN: must reject. */\n reset(&w); w.queue_size=METADATA_CMD_Q_MAX_SIZE;\n assert(metadata_enq_cmd(&w,&cmd)==1); assert(waits==1 && !sends && !w.queue_size);\n reset(&w); cmd.opcode=METADATA_SYNC_SHUTDOWN;\n assert(!metadata_enq_cmd_noblock(&w,&cmd)); assert(broadcasts==1 && !sends);\n cmd.opcode=METADATA_ADD_HOST_INFO; assert(metadata_enq_cmd_noblock(&w,&cmd)==1 && !w.queue_size);\n reset(&w); w.queue_size=METADATA_CMD_Q_MAX_SIZE;\n assert(metadata_enq_cmd_noblock(&w,&cmd)==1 && w.queue_size==METADATA_CMD_Q_MAX_SIZE);\n\n reset(&w); static struct completion completion; cmd.opcode=METADATA_SCAN_HOSTS; cmd.completion=&completion;\n assert(!metadata_enq_cmd(&w,&cmd)); w.flags|=METADATA_FLAG_SCANNING_HOSTS;\n assert(metadata_deq_cmd(&w).opcode==METADATA_DATABASE_NOOP); assert(w.queue_size==1 && !completion.completed);\n w.flags &= ~METADATA_FLAG_SCANNING_HOSTS;\n struct metadata_cmd final=metadata_deq_cmd(&w); assert(final.opcode==METADATA_SCAN_HOSTS && !w.queue_size);\n process_scan(&w,&loop,final); assert(pending_work && !completion.completed);\n assert(w.flags & METADATA_FLAG_SCANNING_HOSTS); pending_after(pending_work,0);\n assert(completion.completed==1 && releases==1 && !(w.flags & METADATA_FLAG_SCANNING_HOSTS));\n\n reset(&w); completion.completed=0; fail_work=1;\n static int scan_result; final.result=&scan_result;\n process_scan(&w,&loop,final);\n assert(completion.completed==1 && scan_result==-1 && !fatal_count && releases==1 && !(w.flags & METADATA_FLAG_SCANNING_HOSTS));\n reset(&w); completion.completed=0; scan_result=0;\n process_scan(&w,&loop,final); assert(!completion.completed && pending_work);\n pending_after(pending_work,UV_ECANCELED);\n assert(completion.completed==1 && scan_result==UV_ECANCELED && releases==1);\n /* Normal periodic scan failure does not own a caller completion. */\n reset(&w); fail_work=1; final.completion=NULL; process_scan(&w,&loop,final);\n assert(releases==1 && !(w.flags & METADATA_FLAG_SCANNING_HOSTS));\n\n reset(&metasync_worker); metadata_queue_ready=0;\n queue_metadata_cmd(METADATA_STORE_CLAIM_ID,mallocz(1),mallocz(1)); assert(releases==2 && !sends);\n metadata_queue_ready=1; metasync_worker.flags=METADATA_FLAG_SHUTDOWN; metasync_worker.async.closed=1;\n queue_metadata_cmd(METADATA_STORE_CLAIM_ID,mallocz(1),mallocz(1)); assert(releases==4 && !sends);\n queue_metadata_cmd(METADATA_DEL_DIMENSION,mallocz(1),NULL); assert(releases==5 && !sends);\n\n /* Run the actual daemon cleanup body through actual metadata APIs. */\n reset(&metasync_worker); metadata_queue_ready=1; lifecycle_mode=1;\n metasync_worker.loop=mallocz(sizeof(loop)); fail_work=1;\n if(!setjmp(exit_env)) netdata_cleanup_and_exit(0);\n assert(exit_code==1 && finalizes==1 && joins==1 && sql_closes==1 && context_closes==1);\n assert(openssl_frees==1 && incomplete_unlinks==1 && !fatal_count && !self_waits && cleanup_calls==1);\n reset(&metasync_worker); metadata_queue_ready=1; lifecycle_mode=1;\n metasync_worker.loop=mallocz(sizeof(loop));\n if(!setjmp(exit_env)) netdata_cleanup_and_exit(0);\n assert(exit_code==0 && finalizes==1 && joins==1 && sql_closes==1 && !fatal_count);\n assert(metadata_sync_shutdown()==0 && joins==1);\n static int sends_before; sends_before=sends;\n assert(metadata_sync_shutdown_prepare()==UV_ECANCELED && sends==sends_before && !self_waits);\n reset(&metasync_worker); metadata_queue_ready=1; lifecycle_mode=1;\n metasync_worker.loop=mallocz(sizeof(loop));\n if(!setjmp(exit_env)) netdata_cleanup_and_exit(1);\n assert(exit_code==1 && finalizes==0 && joins==1 && sql_closes==1 && !fatal_count);\n reset(&metasync_worker); metadata_queue_ready=1; lifecycle_mode=1; persistent_busy=1;\n metasync_worker.loop=mallocz(sizeof(loop));\n if(!setjmp(exit_env)) netdata_cleanup_and_exit(0);\n assert(exit_code==1 && joins==1 && !sql_closes && !context_closes && !openssl_frees && !incomplete_unlinks);\n assert(metasync_worker.loop && !fatal_count && !self_waits && cleanup_calls==1); free(metasync_worker.loop);\n\n /* Negative control executes actual fatal_int -> actual cleanup. Detect its\n  * self-wait instead of hanging or manufacturing a real process crash. */\n reset(&metasync_worker); metadata_queue_ready=1; lifecycle_mode=1; role=WORKER_ROLE;\n metasync_worker.loop=mallocz(sizeof(loop));\n if(!setjmp(self_wait_env)) { fatal_int(__FILE__,__func__,__LINE__,"expected negative control"); assert(0); }\n assert(fatal_count==1 && cleanup_calls==1 && self_waits==1 && !sql_closes); free(metasync_worker.loop);\n /* Actual startup caller joins the failed worker before entering fatal cleanup.\n  * All three worker init error labels execute without worker-side fatal. */\n for(init_failure_stage=1;init_failure_stage<=3;++init_failure_stage) {\n   reset(&metasync_worker); metadata_queue_ready=0; lifecycle_mode=1;\n   if(!setjmp(exit_env)) metadata_sync_init();\n   assert(exit_code==1 && joins==1 && cleanup_calls==1 && fatal_count==1 && !self_waits);\n   assert(metasync_worker.startup_result==-12 && !metadata_queue_ready && sql_closes==1);\n }\n puts("PASS: actual source lifecycle, startup, fatal/cleanup negative control and error propagation cases");\n return 0;\n}\n\'\'\'\n\n\ndef harness(source, main_source, log_source):\n    functions = \'\\n\\n\'.join(function(source, name) for name in (\n        \'metadata_init_cmd_queue\', \'metadata_enq_cmd_noblock\', \'metadata_enq_cmd\', \'metadata_close_loop\', \'metadata_deq_cmd\',\n        \'after_metadata_hosts\', \'queue_metadata_cmd\'))\n    scan = source.split(\'                case METADATA_SCAN_HOSTS:\', 1)[1].split(\'                case METADATA_MAINTENANCE:\', 1)[0]\n    scan_function = \'\'\'static void process_scan(struct metadata_wc *wc, uv_loop_t *loop, struct metadata_cmd cmd) {\n    switch (METADATA_SCAN_HOSTS) { case METADATA_SCAN_HOSTS:\n    \'\'\' + scan + \'\'\' }\n    if (cmd.completion) completion_mark_complete(cmd.completion);\n}\n\'\'\'\n    # Check full-source teardown ordering, not a hand-copied implementation.\n    event = function(source, \'metadata_event_loop\')\n    cleanup = event[event.index(\'    uv_mutex_lock(&wc->cmd_mutex);\'):event.index(\'error_after_timer_init:\')]\n    assert cleanup.index(\'uv_mutex_lock\') < cleanup.index(\'METADATA_FLAG_SHUTDOWN\') < cleanup.index(\'uv_close\') < cleanup.index(\'uv_mutex_unlock\')\n    assert cleanup.index(\'wc->shutdown_result = metadata_close_loop(loop)\') < cleanup.index(\'if (wc->shutdown_result == 0)\') < cleanup.index(\'freez(loop)\') < cleanup.index(\'completion_mark_complete\')\n    assert \'uv_cond_destroy\' not in event\n    assert \'__atomic_store_n(&metadata_queue_ready, 1, __ATOMIC_RELEASE)\' in event\n    assert \'fatal(\' not in event[event.index(\'error_after_timer_init:\'):]\n    import re\n    assert not re.search(r\'\\bstruct metadata_cmd cmd;\',source)\n    init_errors=event[event.index(\'error_after_timer_init:\'):event.rfind(\'}\')]\n    init_worker=\'\'\'static void metadata_event_loop(void *arg) {\n    struct metadata_wc *wc=arg;\n    int ret=-12;\n    uv_loop_t *loop=wc->loop=mallocz(sizeof(uv_loop_t));\n    if(init_failure_stage==1) goto error_after_timer_init;\n    if(init_failure_stage==2) goto error_after_async_init;\n    goto error_after_loop_init;\n    \'\'\'+init_errors+\'\\n}\\n\'\n    create=\'\'\'static int uv_thread_create(int *thread,void (*start)(void *),void *arg) {\n    (void)thread; role=WORKER_ROLE; start(arg); role=MAIN_ROLE; return 0;\n    }\\n\'\'\'\n    init=function(source,\'metadata_sync_init\')\n    api=\'\\n\'.join(function(source,name) for name in (\'metadata_sync_shutdown_prepare\',\'metadata_sync_shutdown\'))\n    main=function(main_source,\'netdata_cleanup_and_exit\').replace(\'{\', \'{\\n    ++cleanup_calls;\',1)\n    fatal=function(log_source,\'fatal_int\').replace(\'void fatal_int\',\'static void fatal_int\',1).replace(\'{\',\'{\\n    ++fatal_count;\',1)\n    return STUBS + CHAIN_STUBS + functions + scan_function + \'\\nstatic void teardown(struct metadata_wc *wc, uv_loop_t *loop) {\\n\' + cleanup + \'\\n}\\n\' + DISPATCH + api + main + fatal + init_worker + create + init + TESTS\n\n\nif __name__ == \'__main__\':\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\'source\', type=Path)\n    parser.add_argument(\'--emit\', type=Path, help=\'Only emit source for a separately selected compiler\')\n    parser.add_argument(\'--main-source\', type=Path)\n    parser.add_argument(\'--log-source\', type=Path)\n    args = parser.parse_args()\n    staging_tests()\n    tree=args.source.resolve().parents[2]\n    main_source=args.main_source or tree/\'daemon/main.c\'\n    log_source=args.log_source or tree/\'libnetdata/log/log.c\'\n    code = harness(args.source.read_text(encoding=\'utf8\'),main_source.read_text(encoding=\'utf8\'),log_source.read_text(encoding=\'utf8\'))\n    if args.emit:\n        args.emit.write_text(code, encoding=\'utf8\', newline=\'\\n\')\n    else:\n        with tempfile.TemporaryDirectory(prefix=\'netdata-source-mock-\') as directory:\n            unit = Path(directory) / \'lifecycle.c\'\n            binary = Path(directory) / \'lifecycle\'\n            unit.write_text(code, encoding=\'utf8\')\n            subprocess.run([\'cc\', \'-std=c11\', \'-Wall\', \'-Wextra\', \'-Werror\', str(unit), \'-o\', str(binary)], check=True)\n            subprocess.run([str(binary)], check=True)\n', encoding='utf8', newline='\n')
           NETDATA_TESTS_B
 
+      - name: Guard AllImages cache retry and compile budget
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          JOB = '  job_compile_and_upload:\n'
+          START = '      - name: Checkout\n'
+          BUDGET = '''      - name: Start AllImages build deadline
+                  if: matrix.platform == 'X86_AllImages'
+                  run: |
+                    # fullcone-allimages-job-deadline
+                    # Leave the final 30 minutes of the 360-minute job for cleanup and uploads.
+                    echo "FC_ALLIMAGES_COMPILE_STOP_EPOCH=$(($(date +%s) + 19800))" >> "$GITHUB_ENV"
+          '''
+          RESTORE = '      - name: Restore Entire OpenWrt Cache from GHCR\n'
+          OLD_RESTORE = "        if: steps.matrix_status.outputs.status != 'success' && fromJSON(github.run_attempt) < 3  && env.FORCE_REBUILD != 'true'\n"
+          NEW_RESTORE = "        if: steps.matrix_status.outputs.status != 'success' && (fromJSON(github.run_attempt) < 3 || (fromJSON(github.run_attempt) == 3 && matrix.platform == 'X86_AllImages')) && env.FORCE_REBUILD != 'true'\n"
+          COMPILE = '      - name: Compile Packages and Firmware\n'
+          TOKEN = '          GITHUB_TOKEN: __OPEN__ secrets.GITHUB_TOKEN }}\n'.replace('__OPEN__', '$'+'{{')
+          PLATFORM = '          FC_BUILD_PLATFORM: __OPEN__ matrix.platform }}\n'.replace('__OPEN__', '$'+'{{')
+          LOG_INIT = '          : > "$build_log"\n'
+          TELEMETRY = '''          # fullcone-allimages-resource-telemetry
+                    sample_allimages_resources() {
+                        {
+                            printf '\\n=== %s ===\\n' "$(date -u +%FT%TZ)"
+                            printf 'CPUs: '; nproc || true
+                            printf 'Load: '; cat /proc/loadavg || true
+                            free -m || true
+                            df -h "$PWD" || true
+                            df -i "$PWD" || true
+                            if [ -r /sys/fs/cgroup/memory.events ]; then
+                                cat /sys/fs/cgroup/memory.events || true
+                            fi
+                        } | tee -a "$GITHUB_WORKSPACE/allimages-resources.log" || true
+                    }
+                    if [[ "$FC_BUILD_PLATFORM" == X86_AllImages ]]; then
+                        : > "$GITHUB_WORKSPACE/allimages-resources.log"
+                        sample_allimages_resources
+                    fi
+          '''
+          HEARTBEAT_START = '              while true; do\n                  sleep 60\n'
+          HEARTBEAT_NEW = '''              ticks=0
+                        while true; do
+                            sleep 60
+          '''
+          HEARTBEAT_TAIL = '''                  tail -5 "$build_log" | sed 's/^/[build-tail] /' || true
+          '''
+          HEARTBEAT_TAIL_NEW = '''                  tail -5 "$build_log" | sed 's/^/[build-tail] /' || true
+                            if [[ "$FC_BUILD_PLATFORM" == X86_AllImages ]]; then
+                                ticks=$((ticks + 1))
+                                if (( ticks % 5 == 0 )); then
+                                    sample_allimages_resources
+                                fi
+                            fi
+          '''
+          OLD_MAKE = '''          make -j$(nproc) V=s > "$build_log" 2>&1
+                    MAKE_EXIT_CODE=$?
+          '''
+          NEW_MAKE = '''          # fullcone-allimages-bounded-make
+                    if [[ "$FC_BUILD_PLATFORM" == X86_AllImages ]]; then
+                        if [[ ! "${FC_ALLIMAGES_COMPILE_STOP_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+                            echo '::error::AllImages compile deadline was not initialized.'
+                            MAKE_EXIT_CODE=2
+                        else
+                            remaining=$((FC_ALLIMAGES_COMPILE_STOP_EPOCH - $(date +%s)))
+                            if (( remaining <= 0 )); then
+                                echo '::error::AllImages compile budget was exhausted before make started.'
+                                MAKE_EXIT_CODE=124
+                            else
+                                echo "AllImages: up to ${remaining}s remain for make."
+                                # GNU timeout supervises make and its process group; do not use --foreground.
+                                timeout --verbose --signal=TERM --kill-after=30s "${remaining}s" make -j"$(nproc)" V=s > "$build_log" 2>&1
+                                MAKE_EXIT_CODE=$?
+                                if [[ "$MAKE_EXIT_CODE" == 124 ]] || { [[ "$MAKE_EXIT_CODE" == 137 ]] && (( $(date +%s) >= FC_ALLIMAGES_COMPILE_STOP_EPOCH )); }; then
+                                    echo '::error::AllImages compile exceeded its time budget; preserving diagnostics before the job deadline.'
+                                fi
+                            fi
+                        fi
+                    else
+                        make -j$(nproc) V=s > "$build_log" 2>&1
+                        MAKE_EXIT_CODE=$?
+                    fi
+          '''
+          HEARTBEAT_END = '''          wait "$heartbeat_pid" 2>/dev/null || true
+                    trap - EXIT
+          '''
+          HEARTBEAT_END_NEW = '''          wait "$heartbeat_pid" 2>/dev/null || true
+                    trap - EXIT
+                    if [[ "$FC_BUILD_PLATFORM" == X86_AllImages ]]; then
+                        sample_allimages_resources
+                    fi
+          '''
+          ARCHIVE = '      - name: Archive complete compiler diagnostics\n'
+          OLD_ARCHIVE = '          for log in build-*.log base-build-*.log; do\n'
+          NEW_ARCHIVE = '          for log in build-*.log base-build-*.log allimages-resources.log; do\n'
+
+          def replace_once(text, old, new, label):
+              if text.count(old) != 1:
+                  raise SystemExit(f'AllImages build guard: unexpected {label} anchor count ({text.count(old)})')
+              return text.replace(old, new, 1)
+
+          def step(job, heading, transform):
+              if job.count(heading) != 1:
+                  raise SystemExit(f'AllImages build guard: unexpected step anchor {heading.strip()}')
+              start = job.index(heading)
+              end = job.find('\n      - ', start + len(heading) - 1)
+              end = len(job) if end < 0 else end + 1
+              return job[:start] + transform(job[start:end]) + job[end:]
+
+          def compile_guard(step_text):
+              for old, new, label in (
+                  (TOKEN, TOKEN + PLATFORM, 'compile environment'),
+                  (LOG_INIT, LOG_INIT + TELEMETRY, 'compile log setup'),
+                  (HEARTBEAT_START, HEARTBEAT_NEW, 'compile heartbeat start'),
+                  (HEARTBEAT_TAIL, HEARTBEAT_TAIL_NEW, 'compile heartbeat tail'),
+                  (OLD_MAKE, NEW_MAKE, 'parallel make'),
+                  (HEARTBEAT_END, HEARTBEAT_END_NEW, 'compile heartbeat cleanup'),
+              ):
+                  step_text = replace_once(step_text, old, new, label)
+              return step_text
+
+          def apply_guard(text):
+              if text.count(JOB) != 1:
+                  raise SystemExit('AllImages build guard: unexpected matrix job anchor')
+              begin = text.index(JOB)
+              end = text.find('\n  job_', begin + len(JOB) - 1)
+              if end < 0:
+                  raise SystemExit('AllImages build guard: missing following job')
+              end += 1
+              job = text[begin:end]
+              markers = ('# fullcone-allimages-job-deadline', NEW_RESTORE.rstrip(), '# fullcone-allimages-resource-telemetry', '# fullcone-allimages-bounded-make', NEW_ARCHIVE.rstrip())
+              if any(marker in job for marker in markers):
+                  if not all(job.count(part) == 1 for part in (BUDGET, NEW_RESTORE, TOKEN + PLATFORM, TELEMETRY, HEARTBEAT_NEW, HEARTBEAT_TAIL_NEW, NEW_MAKE, HEARTBEAT_END_NEW, NEW_ARCHIVE)):
+                      raise SystemExit('AllImages build guard: incomplete or duplicated previously applied guard')
+                  return text
+              job = replace_once(job, START, BUDGET + START, 'matrix checkout')
+              job = step(job, RESTORE, lambda text: replace_once(text, OLD_RESTORE, NEW_RESTORE, 'cache restore condition'))
+              job = step(job, COMPILE, compile_guard)
+              job = step(job, ARCHIVE, lambda text: replace_once(text, OLD_ARCHIVE, NEW_ARCHIVE, 'diagnostic log list'))
+              if not all(job.count(marker) == 1 for marker in markers):
+                  raise SystemExit('AllImages build guard: resulting workflow does not contain exactly one of each guard marker')
+              return text[:begin] + job + text[end:]
+
+          workflow = Path('.github/workflows/Build_Multi_Platform(V6).yml')
+          workflow.write_bytes(apply_guard(workflow.read_text(encoding='utf-8')).encode('utf-8'))
+          PY
+
       - name: Validate generated repository
         id: validate
         run: |
@@ -6914,6 +7062,10 @@ jobs:
                   "matrix.platform != 'X86_VMware' && matrix.platform != 'X86_AllImages'",
                   "Free Disk After Cache Restore",
                   "Free Disk Before Final Compile",
+                  "# fullcone-allimages-job-deadline",
+                  "# fullcone-allimages-resource-telemetry",
+                  "# fullcone-allimages-bounded-make",
+                  "allimages-resources.log",
                   "job_build_x86_installer_iso:",
                   "dependency_file=",
                   "maximize-build-diskspace@d08bf8a34c868f82333a929be6be18a52cd89657",
